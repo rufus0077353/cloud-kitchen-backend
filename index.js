@@ -43,7 +43,7 @@ app.use((req, res) => {
 db.sequelize.sync()
   .then(() => {
     console.log("✅ DB synced");
-    const PORT = process.env.PORT || 5000;
+    const PORT = process.env.PORT || 5432;
     app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
   })
   .catch((err) => console.error("❌ DB error:", err));
