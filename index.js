@@ -39,7 +39,15 @@ app.use((req, res) => {
   res.status(404).json({ message: "Route not found" });
 });
 
-// ✅ Sync DB and start server
-db.sequelize.sync()
-  .then(() =>  console.log("✅ DB synced"))
-  .catch((err) => console.error("❌ DB error:", err));
+const PORT = process.env.PORT || 3000;
+
+sequelize.sync()
+  .then(() => {
+    console.log("✅ DB synced successfully");
+    app.listen(PORT, () => {
+      console.log(`🚀 Server is running on port ${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error("❌ DB sync failed:", err);
+  });
