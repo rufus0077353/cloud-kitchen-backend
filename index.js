@@ -35,6 +35,10 @@ app.get("/ping", (req, res) => {
   res.send("pong");
 });
 
+app.get('/', (req, res) => {
+  res.send('✅ Cloud Kitchen Backend is live!');
+});
+
 // 404 fallback handler
 app.use((req, res) => {
   res.status(404).json({ message: "Route not found" });
