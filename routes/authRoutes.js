@@ -94,47 +94,7 @@ router.post("/login", async (req, res) => {
   }
 });
 
-router.post("/login", async (req, res) => {
 
-  const { username, password } = req.body;
-
-
-
-  try {
-
-    const vendor = await Vendor.findOne({ where: { username } });
-
-
-
-    if (!vendor || !(await bcrypt.compare(password, vendor.password))) {
-
-      return res.status(401).json({ message: "Invalid credentials" });
-
-    }
-
-
-
-    const token = jwt.sign({ vendorId: vendor.id }, JWT_SECRET, { expiresIn: "1h" });
-
-
-
-    res.json({
-
-      message: "Login successful",
-
-      token,
-
-      vendor: { id: vendor.id, name: vendor.name, username: vendor.username }
-
-    });
-
-  } catch (err) {
-
-    res.status(500).json({ message: "Server error", error: err.message });
-
-  }
-
-});
 
 // PUT /api/auth/update
 router.put("/update", authenticateToken, async (req, res) => {
