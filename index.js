@@ -13,10 +13,7 @@ const menuItemRoutes = require("./routes/menuItemRoutes");
 const orderRoutes = require("./routes/orderRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 
-app.use(cors({
-  origin: 'glistening-taffy-7be8bf.netlify.app',
-  credentials: true,
-}));
+app.use(cors());
 app.use(express.json());
 
 console.log("✅ Registering auth routes");
