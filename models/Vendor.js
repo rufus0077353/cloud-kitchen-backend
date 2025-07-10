@@ -1,3 +1,5 @@
+const { Timestamp } = require("firebase-admin/firestore");
+
 // models/vendor.js
 module.exports = (sequelize, DataTypes) => {
   const Vendor = sequelize.define("Vendor", {
@@ -15,7 +17,10 @@ module.exports = (sequelize, DataTypes) => {
     UserId: {
       type: DataTypes.INTEGER,
       allowNull: false,
-    },
+    }
+  }, {
+    tableName: 'vendors',
+    timestamps: true
   });
 
   return Vendor;
