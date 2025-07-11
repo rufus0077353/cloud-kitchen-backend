@@ -15,12 +15,12 @@ router.get("/ping", (req, res) => {
 });
 
 // Register
-router.post("/register", async (req, res) => {  const { name, email, password, role } = req.body;
-  
+router.post("/register", async (req, res) => {
+  const { name, email, password, role } = req.body;
 
   if (!name || !email || !password || !role) {
     return res.status(400).json({ message: "All fields are required" });
-  } 
+  }
 
   try {
     const existingUser = await User.findOne({ where: { email } });
@@ -30,19 +30,23 @@ router.post("/register", async (req, res) => {  const { name, email, password, r
 
     const newUser = await User.create({ name, email, password, role });
 
-    const token = jwt.sign({ userId: newUser.id } , JWT_SECRET, { expiresIn: "1h"});
+    const token = jwt.sign({ userId: newUser.id }, JWT_SECRET, { expiresIn: "1h" });
+
     res.status(201).json({
       message: "User registered",
       token,
-      user: { id: newUser.id, name: newUser.name, email: newUser.email, role: newUser.role, 
-
-       },
+      user: {
+        id: newUser.id,
+        name: newUser.name,
+        email: newUser.email,
+        role: newUser.role
+      },
     });
-  } catch (err)  {
-    console.error("Token creation failed:". err.message);
-  {
-    res.status(500).json({ message: "JWT creation failed", error: tokenerr.message });
-  }}
+
+  } catch (err) {
+    console.error("❌ Registration failed:", err.message);
+    res.status(500).json({ message: "Registration failed", error: err.message });
+  }
 });
 
 // 🛡️ PROTECTED: Admin-only route to register new admin or vendor users
