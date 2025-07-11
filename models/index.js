@@ -7,11 +7,11 @@ db.Sequelize = Sequelize;
 db.sequelize = sequelize;
 
 // Import models
-db.User = require("./user")(sequelize, Sequelize.DataTypes);
-db.Vendor = require("./vendor")(sequelize, Sequelize.DataTypes);
-db.MenuItem = require("./menuitem")(sequelize, Sequelize.DataTypes);
-db.Order = require("./order")(sequelize, Sequelize.DataTypes);
-db.OrderItem = require("./orderitem")(sequelize, Sequelize.DataTypes);
+db.User = require("./User")(sequelize, Sequelize.DataTypes);
+db.Vendor = require("./Vendor")(sequelize, Sequelize.DataTypes);
+db.MenuItem = require("./MenuItem")(sequelize, Sequelize.DataTypes);
+db.Order = require("./Order")(sequelize, Sequelize.DataTypes);
+db.OrderItem = require("./OrderItem")(sequelize, Sequelize.DataTypes);
 
 // Associations
 Object.values(db).forEach(model => {
