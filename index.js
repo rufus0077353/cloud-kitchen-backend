@@ -49,7 +49,7 @@ app.use((req, res) => {
 
 const PORT = process.env.PORT || 3000;
 
-sequelize.sync({ force: true})
+sequelize.sync()
   .then(() => {
     console.log("✅ DB synced successfully");
     app.listen(PORT, () => {
