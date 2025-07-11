@@ -1,3 +1,5 @@
+const { Timestamp } = require("firebase-admin/firestore");
+
 module.exports = (sequelize, DataTypes) => {
   const MenuItem = sequelize.define("MenuItem", {
     name: {
@@ -15,6 +17,9 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.INTEGER,
       allowNull: false,
     }
+  }, {
+    tableName: 'menu_items',
+    timestamps: true
   });
 
 
