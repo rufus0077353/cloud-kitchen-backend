@@ -51,7 +51,7 @@ app.use((req, res) => {
 
 const PORT = process.env.PORT || 3000;
 
-sequelize.sync({ force: true }).then(() => {
+sequelize.sync().then(() => {
  console.log("✅ DB synced successfully");
 
  // Check the tables created
