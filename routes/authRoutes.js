@@ -18,19 +18,25 @@ router.get("/ping", (req, res) => {
 router.post("/register", async (req, res) => {
   const { name, email, password, role } = req.body;
 
+  console.log("🔐 Incoming registration request", req.body);
+
   if (!name || !email || !password || !role) {
+    console.log("❌ Missing required fields");
     return res.status(400).json({ message: "All fields are required" });
   }
 
   try {
     const existingUser = await User.findOne({ where: { email } });
     if (existingUser) {
+      console.log("⚠️ User already exists:", email);
       return res.status(409).json({ message: "User already registered" });
     }
 
     const newUser = await User.create({ name, email, password, role });
 
-    const token = jwt.sign({ userId: newUser.id }, JWT_SECRET, { expiresIn: "1h" });
+    const token = jwt.sign({ userId: newUser.id }, process.env.JWT_SECRET, { expiresIn: "1h" });
+
+    console.log("✅ User created:", newUser);
 
     res.status(201).json({
       message: "User registered",
@@ -39,13 +45,12 @@ router.post("/register", async (req, res) => {
         id: newUser.id,
         name: newUser.name,
         email: newUser.email,
-        role: newUser.role
+        role: newUser.role,
       },
     });
-
   } catch (err) {
-    console.error("❌ Registration failed:", err.message);
-    res.status(500).json({ message: "Registration failed", error: err.message });
+    console.error("❌ Registration failed:", err);
+    res.status(500).json({ message: "Internal Server Error", error: err.message });
   }
 });
 
