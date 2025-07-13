@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
+
 const sequelize = require('./db');
 
 console.log("✅ Connecting to database:", process.env.DB_NAME);
@@ -49,13 +50,13 @@ app.use((req, res) => {
   res.status(404).json({ message: "Route not found" });
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 
-sequelize.sync().then(() => {
+db.sequelize.sync({ alter : true }).then(() => {
  console.log("✅ DB synced successfully");
 
  // Check the tables created
- sequelize.getQueryInterface().showAllTables()
+ db.sequelize.getQueryInterface().showAllTables()
    .then(tables => {
      console.log("🧩 Tables in DB:", tables);
    });

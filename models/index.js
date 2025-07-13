@@ -2,22 +2,21 @@ const Sequelize = require("sequelize");
 const sequelize = require("../config/db");
 
 const db = {};
-
 db.Sequelize = Sequelize;
 db.sequelize = sequelize;
 
-// Import models
+// ✅ Load all models
 db.User = require("./User")(sequelize, Sequelize.DataTypes);
 db.Vendor = require("./Vendor")(sequelize, Sequelize.DataTypes);
 db.MenuItem = require("./MenuItem")(sequelize, Sequelize.DataTypes);
 db.Order = require("./Order")(sequelize, Sequelize.DataTypes);
 db.OrderItem = require("./OrderItem")(sequelize, Sequelize.DataTypes);
 
-// Associations
+// 🔁 Associations (if needed)
 Object.values(db).forEach(model => {
-    if (model.associate) {
-        model.associate(db);
-    }
+  if (model.associate) {
+    model.associate(db);
+  }
 });
 
 // Vendor -> MenuItems (1:M)
