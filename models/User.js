@@ -20,8 +20,9 @@ module.exports = (sequelize, DataTypes) => {
       defaultValue: "user", // very important for role-based access
     }
   }, {
-    tableName: 'Users',
-    timestamps: true
+    tableName: 'users',
+    timestamps: true,
+    freezeTableName: true 
   });
 
   // Hash password before saving
