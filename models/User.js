@@ -20,7 +20,7 @@ module.exports = (sequelize, DataTypes) => {
       defaultValue: "user", // very important for role-based access
     }
   }, {
-    tableName: 'users',
+    tableName: 'Users',
     timestamps: true
   });
 

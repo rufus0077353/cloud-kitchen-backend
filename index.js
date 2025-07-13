@@ -4,6 +4,8 @@ const express = require("express");
 const cors = require("cors");
 const sequelize = require('./db');
 
+console.log("✅ Connecting to database:", process.env.DB_NAME);
+
 const app = express();
 
 const db = require("./models");
