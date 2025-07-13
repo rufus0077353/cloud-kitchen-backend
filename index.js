@@ -51,13 +51,18 @@ app.use((req, res) => {
 
 const PORT = process.env.PORT || 3000;
 
-sequelize.sync({ force: true})
-  .then(() => {
-    console.log("✅ DB synced successfully");
-    app.listen(PORT, () => {
-      console.log(`🚀 Server is running on port ${PORT}`);
-    });
-  })
-  .catch((err) => {
-    console.error("❌ DB sync failed:", err);
-  });
+sequelize.sync({ force: true }).then(() => {
+ console.log("✅ DB synced successfully");
+
+ // Check the tables created
+ sequelize.getQueryInterface().showAllTables()
+   .then(tables => {
+     console.log("🧩 Tables in DB:", tables);
+   });
+
+ app.listen(PORT, () => {
+   console.log(`🚀 Server is running on port ${PORT}`);
+ });
+}).catch(err => {
+ console.error("❌ DB sync failed:", err);
+});
