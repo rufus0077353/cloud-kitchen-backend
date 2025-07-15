@@ -1,27 +1,27 @@
+
 const express = require("express");
 const router = express.Router();
 const { Vendor, MenuItem, User } = require("../models");
 
-// CREATE a vendor
+// 🔹 CREATE Vendor
 router.post("/", async (req, res) => {
   const { name, location, cuisine, UserId } = req.body;
+  console.log("📥 Create Vendor Request:", req.body);
 
-  console.log("Request Body:", req.body);
-
-  if (!name || !location ||!cuisine ||!UserId) {
+  if (!name || !location || !cuisine || !UserId) {
     return res.status(400).json({ message: "Name, location, cuisine, and UserId are required" });
   }
 
   try {
     const vendor = await Vendor.create({ name, location, cuisine, UserId });
-    res.status(201).json(vendor);
+    res.status(201).json({ message: "Vendor created", vendor });
   } catch (err) {
-    console.error("Error creating vendor:", err);
+    console.error("❌ Error creating vendor:", err);
     res.status(500).json({ message: "Error creating vendor", error: err.message });
   }
 });
 
-// READ all non-deleted vendors
+// 🔹 GET All Vendors
 router.get("/", async (req, res) => {
   try {
     const vendors = await Vendor.findAll();
@@ -31,30 +31,29 @@ router.get("/", async (req, res) => {
   }
 });
 
-// READ vendor by ID
+// 🔹 GET Vendor by ID
 router.get("/:id", async (req, res) => {
   try {
     const vendor = await Vendor.findByPk(req.params.id);
-    if (!vendor) {
-      return res.status(404).json({ message: "Vendor not found" });
-    }
+    if (!vendor) return res.status(404).json({ message: "Vendor not found" });
     res.json(vendor);
   } catch (err) {
     res.status(500).json({ message: "Error fetching vendor", error: err.message });
   }
 });
 
-// UPDATE vendor
+// 🔹 UPDATE Vendor
 router.put("/:id", async (req, res) => {
+  const { name, cuisine, location } = req.body;
+
   try {
-    const { name, cuisine } = req.body;
     const vendor = await Vendor.findByPk(req.params.id);
-    if (!vendor || vendor.isDeleted) {
-      return res.status(404).json({ message: "Vendor not found" });
-    }
+    if (!vendor) return res.status(404).json({ message: "Vendor not found" });
 
     vendor.name = name || vendor.name;
     vendor.cuisine = cuisine || vendor.cuisine;
+    vendor.location = location || vendor.location;
+
     await vendor.save();
 
     res.json({ message: "Vendor updated", vendor });
@@ -63,31 +62,11 @@ router.put("/:id", async (req, res) => {
   }
 });
 
-
-// SOFT DELETE vendor
-router.patch("/:id/delete", async (req, res) => {
-  try {
-    const vendor = await Vendor.findByPk(req.params.id);
-    if (!vendor || vendor.isDeleted) {
-      return res.status(404).json({ message: "Vendor not found" });
-    }
-
-    await vendor.destroy();
-
-    res.json({ message: "Vendor soft deleted" });
-  } catch (err) {
-    res.status(500).json({ message: "Error deleting vendor", error: err.message });
-  }
-});
-
-
-// routes/vendorRoutes.js
+// 🔹 DELETE Vendor (Hard Delete)
 router.delete("/:id", async (req, res) => {
   try {
     const vendor = await Vendor.findByPk(req.params.id);
-    if (!vendor) {
-      return res.status(404).json({ message: "Vendor not found" });
-    }
+    if (!vendor) return res.status(404).json({ message: "Vendor not found" });
 
     await vendor.destroy();
     res.json({ message: "Vendor deleted successfully" });
@@ -96,22 +75,19 @@ router.delete("/:id", async (req, res) => {
   }
 });
 
-
-// routes/vendorRoutes.js
+// 🔹 GET Menu Items by Vendor
 router.get("/:vendorId/menu", async (req, res) => {
-  const { vendorId } = req.params;
   try {
     const menuItems = await MenuItem.findAll({
-      where: { VendorId: vendorId },
+      where: { VendorId: req.params.vendorId }
     });
     res.json(menuItems);
   } catch (err) {
-    res.status(500).json({ message: "Failed to fetch menu", error: err.message });
+    res.status(500).json({ message: "Error fetching menu items", error: err.message });
   }
 });
 
-
-
+// 🔹 ADD Menu Item to Vendor
 router.post("/:vendorId/menu", async (req, res) => {
   const { name, price, description } = req.body;
   const { vendorId } = req.params;
