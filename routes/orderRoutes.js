@@ -1,16 +1,18 @@
+
 const express = require("express");
 const router = express.Router();
 const { Order, OrderItem, Vendor, MenuItem, User } = require("../models");
 const { Op } = require("sequelize");
 const { authenticateToken } = require("../middleware/authMiddleware");
 
-// ✅ GET /api/orders/my - Get orders of logged-in user
+/**
+ * GET /api/orders/my
+ * Get orders for the logged-in user
+ */
 router.get("/my", authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.id;
-
     const orders = await Order.findAll({
-      where: { UserId: userId },
+      where: { UserId: req.user.id },
       include: [
         { model: Vendor, attributes: ["id", "name", "cuisine"] },
         {
@@ -27,7 +29,10 @@ router.get("/my", authenticateToken, async (req, res) => {
   }
 });
 
-// ✅ GET /api/orders/vendor/:vendorId - Vendor view their orders
+/**
+ * GET /api/orders/vendor/:vendorId
+ * Get orders for a specific vendor
+ */
 router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
   try {
     const orders = await Order.findAll({
@@ -48,9 +53,13 @@ router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
   }
 });
 
-// ✅ POST /api/orders - Create new order
+/**
+ * POST /api/orders
+ * Create a new order with associated order items
+ */
 router.post("/", async (req, res) => {
   const { UserId, VendorId, totalAmount, items } = req.body;
+
   if (!UserId || !VendorId || !totalAmount || !items?.length) {
     return res.status(400).json({ message: "UserId, VendorId, totalAmount and items are required" });
   }
@@ -58,38 +67,44 @@ router.post("/", async (req, res) => {
   try {
     const order = await Order.create({ UserId, VendorId, totalAmount });
 
-    const orderItems = items.map((item) => ({
+    const orderItems = items.map(item => ({
       OrderId: order.id,
       MenuItemId: item.MenuItemId,
       quantity: item.quantity,
     }));
 
     await OrderItem.bulkCreate(orderItems);
+
     res.status(201).json({ message: "Order created", order });
   } catch (err) {
     res.status(500).json({ message: "Error creating order", error: err.message });
   }
 });
 
-// ✅ PUT /api/orders/:id - Update order
+/**
+ * PUT /api/orders/:id
+ * Update order totalAmount and order items
+ */
 router.put("/:id", async (req, res) => {
-  const orderId = req.params.id;
+  const { id } = req.params;
   const { totalAmount, items } = req.body;
 
   try {
-    const order = await Order.findByPk(orderId);
+    const order = await Order.findByPk(id);
     if (!order) return res.status(404).json({ message: "Order not found" });
 
     if (totalAmount) order.totalAmount = totalAmount;
     await order.save();
 
     if (items?.length) {
-      await OrderItem.destroy({ where: { OrderId: orderId } });
-      const orderItems = items.map((item) => ({
-        OrderId: order.id,
+      await OrderItem.destroy({ where: { OrderId: id } });
+
+      const orderItems = items.map(item => ({
+        OrderId: id,
         MenuItemId: item.MenuItemId,
         quantity: item.quantity,
       }));
+
       await OrderItem.bulkCreate(orderItems);
     }
 
@@ -99,7 +114,10 @@ router.put("/:id", async (req, res) => {
   }
 });
 
-// ✅ DELETE /api/orders/:id - Delete order
+/**
+ * DELETE /api/orders/:id
+ * Delete an order and associated order items
+ */
 router.delete("/:id", async (req, res) => {
   try {
     const order = await Order.findByPk(req.params.id);
@@ -114,7 +132,10 @@ router.delete("/:id", async (req, res) => {
   }
 });
 
-// ✅ GET /api/orders/filter - Filter orders by userId, vendorId, status, date
+/**
+ * GET /api/orders/filter
+ * Filter orders by UserId, VendorId, status, and date range
+ */
 router.get("/filter", async (req, res) => {
   const { UserId, VendorId, status, startDate, endDate } = req.query;
 
@@ -149,12 +170,15 @@ router.get("/filter", async (req, res) => {
   }
 });
 
-// ✅ GET /api/orders/:id/invoice - Generate invoice for specific order
+/**
+ * GET /api/orders/:id/invoice
+ * Generate an HTML invoice for a specific order
+ */
 router.get("/:id/invoice", async (req, res) => {
-  const orderId = req.params.id;
+  const { id } = req.params;
 
   try {
-    const order = await Order.findByPk(orderId, {
+    const order = await Order.findByPk(id, {
       include: [
         { model: User, attributes: ["name", "email"] },
         { model: Vendor, attributes: ["name", "cuisine"] },
@@ -168,20 +192,19 @@ router.get("/:id/invoice", async (req, res) => {
 
     if (!order) return res.status(404).json({ message: "Order not found" });
 
-    // Simple HTML invoice
     const html = `
-      <h2>Order Invoice #${order.id}</h2>
-      <p>User: ${order.User.name} (${order.User.email})</p>
-      <p>Vendor: ${order.Vendor.name} (${order.Vendor.cuisine})</p>
-      <p>Status: ${order.status}</p>
+      <h2>Invoice for Order #${order.id}</h2>
+      <p><strong>User:</strong> ${order.User.name} (${order.User.email})</p>
+      <p><strong>Vendor:</strong> ${order.Vendor.name} (${order.Vendor.cuisine})</p>
       <ul>
-        ${order.MenuItems.map(
-          (item) =>
-            `<li>${item.name} (x${item.OrderItem.quantity}) - ₹${item.price}</li>`
+        ${order.MenuItems.map(item =>
+          `<li>${item.name} (x${item.OrderItem.quantity}) - ₹${item.price}</li>`
         ).join("")}
       </ul>
-      <p><strong>Total: ₹${order.totalAmount}</strong></p>
+      <p><strong>Status:</strong> ${order.status}</p>
+      <p><strong>Total Amount:</strong> ₹${order.totalAmount}</p>
     `;
+
     res.send(html);
   } catch (err) {
     res.status(500).json({ message: "Error generating invoice", error: err.message });

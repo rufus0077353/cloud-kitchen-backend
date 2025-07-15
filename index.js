@@ -17,7 +17,8 @@ const orderRoutes = require("./routes/orderRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 
 app.use(cors({
-  origin: 'https://glistening-taffy-7be8bf.netlify.app',
+  origin: ["https://servezy.in", "https://glistening-taffy-7be8bf.netlify.app"],
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   credentials: true,
 }));
 app.use(express.json());
