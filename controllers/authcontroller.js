@@ -1,6 +1,6 @@
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const User = require('../models/User');
+const { User, Vendor } = require('../models'); // ✅ make sure Vendor is imported
 
 exports.registerUser = async (req, res) => {
   try {
@@ -37,8 +37,26 @@ exports.loginUser = async (req, res) => {
     if (!isMatch)
       return res.status(401).json({ message: "Invalid credentials" });
 
-    const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: '1d' });
-    res.status(200).json({ message: "Login successful", token });
+    const token = jwt.sign({ userId: user.id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '1d' });
+
+    // ✅ Check for vendor if role === 'vendor'
+    let vendor = null;
+    if (user.role === 'vendor') {
+      vendor = await Vendor.findOne({ where: { UserId: user.id } });
+    }
+
+    res.status(200).json({
+      message: "Login successful",
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+      },
+      vendor, // ✅ send vendor object (will be null for non-vendors)
+    });
+
   } catch (err) {
     res.status(500).json({ message: "Server error", error: err.message });
   }
