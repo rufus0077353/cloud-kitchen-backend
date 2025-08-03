@@ -75,16 +75,20 @@ router.delete("/users/:id", authenticateToken, requireAdmin, async (req, res) =>
 });
 
 // ✅ Promote User to Vendor
-router.put("/users/:id/promote", authenticateToken, requireAdmin, async (req, res) => {
+// Promote user to vendor
+router.put("/promote/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const user = await User.findByPk(req.params.id);
-    if (!user) return res.status(404).json({ message: "User not found" });
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
 
     user.role = "vendor";
     await user.save();
-    res.json({ message: "User promoted to vendor", user });
+
+    res.json({ message: "User promoted to vendor successfully", user });
   } catch (err) {
-    res.status(500).json({ message: "Promotion failed", error: err.message });
+    res.status(500).json({ message: "Failed to promote user", error: err.message });
   }
 });
 
