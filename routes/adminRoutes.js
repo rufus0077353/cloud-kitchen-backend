@@ -43,25 +43,31 @@ router.post("/users", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
+// Update a user by ID
 router.put("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
-  const { id } = req.params;
-  const { name, email, role } = req.body;
-
   try {
-    const user = await User.findByPk(id);
-    if (!user) return res.status(404).json({ message: "User not found" });
+    const { name, email, password, role } = req.body;
+    const user = await User.findByPk(req.params.id);
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
 
     user.name = name || user.name;
     user.email = email || user.email;
     user.role = role || user.role;
 
+    if (password) {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      user.password = hashedPassword;
+    }
+
     await user.save();
-    res.json({ message: "User updated", user });
+    res.json({ message: "User updated successfully", user });
   } catch (err) {
-    res.status(500).json({ message: "User update failed", error: err.message });
+    res.status(500).json({ message: "Failed to update user", error: err.message });
   }
 });
-
 router.delete("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const user = await User.findByPk(req.params.id);
