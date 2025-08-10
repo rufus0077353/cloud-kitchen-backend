@@ -16,11 +16,14 @@ const menuItemRoutes = require("./routes/menuItemRoutes");
 const orderRoutes = require("./routes/orderRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 
+// ✅ CORS fix for PATCH + Authorization
 app.use(cors({
   origin: ["https://servezy.in", "https://glistening-taffy-7be8bf.netlify.app"],
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   credentials: true,
+  methods: "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS", // include PATCH
+  allowedHeaders: "Content-Type, Authorization, X-Requested-With"
 }));
+
 app.use(express.json());
 
 console.log("✅ Registering auth routes");
