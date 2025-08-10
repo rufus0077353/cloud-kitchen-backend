@@ -2,6 +2,8 @@ require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
+const http = require("http");
+const { Server } = require("socket.io");
 
 const sequelize = require('./db');
 
@@ -17,14 +19,38 @@ const orderRoutes = require("./routes/orderRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 
 // ✅ CORS fix for PATCH + Authorization
+const FRONTENDS = ["https://servezy.in", "https://glistening-taffy-7be8bf.netlify.app, http://localhost:3000"];
+
 app.use(cors({
-  origin: ["https://servezy.in", "https://glistening-taffy-7be8bf.netlify.app"],
+  origin: FRONTENDS,
   credentials: true,
   methods: "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS", // include PATCH
   allowedHeaders: "Content-Type, Authorization, X-Requested-With"
 }));
 
 app.use(express.json());
+
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: FRONTENDS,
+    methods: ["GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS"],
+    credentials: true,
+  },
+});
+
+app.set("io", io);
+
+// Basic vendor room joining
+io.on("connection", (socket) => {
+  // client should send vendorId after login
+  socket.on("vendor:join", (vendorId) => {
+    if (!vendorId) return;
+    socket.join(`vendor:${vendorId}`);
+  });
+
+  socket.on("disconnect", () => {});
+});
 
 console.log("✅ Registering auth routes");
 app.use("/api/auth", authRoutes);
