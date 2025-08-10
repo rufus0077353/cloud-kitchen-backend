@@ -2,6 +2,8 @@
 const express = require("express");
 const router = express.Router();
 const { Vendor, MenuItem, User } = require("../models");
+const { authenticateToken } = require("../middleware/authMiddleware");
+const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 
 // 🔹 CREATE Vendor
 router.post("/", async (req, res) => {
@@ -94,6 +96,10 @@ router.get("/:vendorId/menu", async (req, res) => {
   } catch (err) {
     res.status(500).json({ message: "Error fetching menu items", error: err.message });
   }
+});
+
+router.get("/me", authenticateToken, requireVendor, ensureVendorProfile,(req,res) => {
+  res.json({ vendorId: req.vendor.id, userId: req.user.id })
 });
 
 // 🔹 ADD Menu Item to Vendor
