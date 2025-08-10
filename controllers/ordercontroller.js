@@ -69,6 +69,26 @@ exports.getVendorOrders = async (req, res) => {
   }
 };
 
+exports.getVendorOrdersSecure = async (req, res) => {
+  try {
+    const { Order, OrderItem, MenuItem, User } = require("../models");
+    const vendorId = req.vendor.id; // set by ensureVendorProfile middleware
+
+    const orders = await Order.findAll({
+      where: { VendorId: vendorId },
+      include: [
+        { model: User, attributes: ["id", "name", "email"] },
+        { model: OrderItem, include: [{ model: MenuItem, attributes: ["id","name","price"] }] }
+      ],
+      order: [["createdAt", "DESC"]],
+    });
+
+    res.json(orders); // must be an array
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch vendor orders", error: err.message });
+  }
+};
+
 exports.updateOrder = async (req, res) => {
   const { id } = req.params;
   const { totalAmount, items } = req.body;
@@ -161,6 +181,32 @@ exports.getInvoice = async (req, res) => {
     });
 
     if (!order) return res.status(404).json({ message: "Order not found" });
+
+// ✅ ADD THIS EXACT FUNCTION (anywhere among exports—top or bottom is fine)
+exports.updateOrderStatus = async (req, res) => {
+  try {
+    const vendorId = req.vendor.id;          // set by ensureVendorProfile
+    const { id } = req.params;
+    const { status } = req.body;
+
+    const allowed = ["pending", "accepted", "rejected", "ready", "delivered"];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ message: "Invalid status" });
+    }
+
+    const order = await Order.findByPk(id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+    if (order.VendorId !== vendorId) {
+      return res.status(403).json({ message: "Not your order" });
+    }
+
+    order.status = status;
+    await order.save();
+    res.json({ message: "Status updated", order });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to update status", error: err.message });
+  }
+};
 
     const html = `
       <h2>Invoice for Order #${order.id}</h2>

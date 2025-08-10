@@ -3,7 +3,8 @@ const express = require("express");
 const router = express.Router();
 const { Order, OrderItem, Vendor, MenuItem, User } = require("../models");
 const { Op } = require("sequelize");
-const { authenticateToken } = require("../middleware/authMiddleware");
+const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
+const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 
 /**
  * GET /api/orders/my
@@ -52,6 +53,7 @@ router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
     res.status(500).json({ message: "Error fetching vendor orders", error: err.message });
   }
 });
+
 
 /**
  * POST /api/orders
@@ -210,5 +212,7 @@ router.get("/:id/invoice", async (req, res) => {
     res.status(500).json({ message: "Error generating invoice", error: err.message });
   }
 });
+
+router.patch("/:id/status", authenticateToken, requireVendor, ensureVendorProfile, ordercontroller, updateOrderStatus);
 
 module.exports = router;
