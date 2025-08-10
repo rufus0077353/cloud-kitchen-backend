@@ -22,6 +22,20 @@ router.get(
   }
 );
 
+router.get("/", async (req, res) => {
+  try {
+    const { vendorId } = req.query;
+    if (!vendorId) {
+      // optional: return all or []
+      return res.json([]); // safest to avoid huge payloads/accidents
+    }
+    const items = await MenuItem.findAll({ where: { VendorId: vendorId } });
+    res.json(items); // must be an array
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch menu items", error: err.message });
+  }
+});
+
 // CREATE a new menu item (derive VendorId from ensured profile)
 router.post(
   "/",
