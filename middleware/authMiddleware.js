@@ -1,4 +1,4 @@
-// middleware/authMiddleware.js
+
 const jwt = require("jsonwebtoken");
 const { User } = require("../models");
 
@@ -15,10 +15,11 @@ const authenticateToken = async (req, res, next) => {
     const user = await User.findByPk(decoded.userId);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    req.user = user;
+    // keep it small & predictable
+    req.user = { id: user.id, role: user.role };
     next();
   } catch (err) {
-    return res.status(403).json({ message: "Invalid token" });
+    return res.status(401).json({ message: "Invalid or expired token" });
   }
 };
 
@@ -29,7 +30,11 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
-module.exports = { 
-  authenticateToken,
-   requireAdmin 
-  };
+const requireVendor = (req, res, next) => {
+  if (req.user.role !== "vendor") {
+    return res.status(403).json({ message: "Forbidden: Vendors only" });
+  }
+  next();
+};
+
+module.exports = { authenticateToken, requireAdmin, requireVendor };
