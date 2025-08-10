@@ -62,6 +62,15 @@ router.put("/:id", async (req, res) => {
   }
 });
 
+router.get("/:id/menu", async (req, res) => {
+  try {
+    const items = await MenuItem.findAll({ where: { VendorId: req.params.id } });
+    res.json(items); // must be an array
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch vendor menu", error: err.message });
+  }
+});
+
 // 🔹 DELETE Vendor (Hard Delete)
 router.delete("/:id", async (req, res) => {
   try {
