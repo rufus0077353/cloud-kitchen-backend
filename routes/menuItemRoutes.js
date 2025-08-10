@@ -1,89 +1,100 @@
+
 // routes/menuItemRoutes.js
 const express = require("express");
 const router = express.Router();
-const { MenuItem, Vendor } = require("../models");
+const { MenuItem } = require("../models");
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
-
-// helper: get vendor record for this user
-async function findVendorByUserId(userId) {
-  return Vendor.findOne({ where: { UserId: userId } });
-}
+const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 
 // GET all menu items for THIS vendor
-router.get("/mine", authenticateToken, requireVendor, async (req, res) => {
-  try {
-    const vendor = await findVendorByUserId(req.user.id);
-    if (!vendor) return res.status(404).json({ message: "Vendor profile not found for this user" });
-
-    const items = await MenuItem.findAll({ where: { VendorId: vendor.id } });
-    res.json(items);
-  } catch (err) {
-    res.status(500).json({ message: "Failed to fetch menu items", error: err.message });
-  }
-});
-
-// CREATE a new menu item (derive VendorId from token)
-router.post("/", authenticateToken, requireVendor, async (req, res) => {
-  try {
-    const vendor = await findVendorByUserId(req.user.id);
-    if (!vendor) return res.status(404).json({ message: "Vendor profile not found for this user" });
-
-    const { name, price, description } = req.body;
-    if (!name || price === undefined || price === null) {
-      return res.status(400).json({ message: "Name and price are required" });
+router.get(
+  "/mine",
+  authenticateToken,
+  requireVendor,
+  ensureVendorProfile,
+  async (req, res) => {
+    try {
+      const items = await MenuItem.findAll({ where: { VendorId: req.vendor.id } });
+      res.json(items);
+    } catch (err) {
+      res.status(500).json({ message: "Failed to fetch menu items", error: err.message });
     }
-
-    const item = await MenuItem.create({
-      name,
-      price,
-      description,
-      VendorId: vendor.id,
-    });
-
-    res.status(201).json({ message: "Menu item created", item });
-  } catch (err) {
-    res.status(500).json({ message: "Failed to create menu item", error: err.message });
   }
-});
+);
+
+// CREATE a new menu item (derive VendorId from ensured profile)
+router.post(
+  "/",
+  authenticateToken,
+  requireVendor,
+  ensureVendorProfile,
+  async (req, res) => {
+    try {
+      const { name, price, description } = req.body;
+      if (!name || price === undefined || price === null) {
+        return res.status(400).json({ message: "Name and price are required" });
+      }
+
+      const item = await MenuItem.create({
+        name,
+        price,
+        description,
+        VendorId: req.vendor.id,
+      });
+
+      res.status(201).json({ message: "Menu item created", item });
+    } catch (err) {
+      res.status(500).json({ message: "Failed to create menu item", error: err.message });
+    }
+  }
+);
 
 // UPDATE a menu item (ownership check)
-router.put("/:id", authenticateToken, requireVendor, async (req, res) => {
-  try {
-    const vendor = await findVendorByUserId(req.user.id);
-    if (!vendor) return res.status(404).json({ message: "Vendor profile not found for this user" });
+router.put(
+  "/:id",
+  authenticateToken,
+  requireVendor,
+  ensureVendorProfile,
+  async (req, res) => {
+    try {
+      const item = await MenuItem.findByPk(req.params.id);
+      if (!item) return res.status(404).json({ message: "Menu item not found" });
+      if (item.VendorId !== req.vendor.id)
+        return res.status(403).json({ message: "Not your menu item" });
 
-    const item = await MenuItem.findByPk(req.params.id);
-    if (!item) return res.status(404).json({ message: "Menu item not found" });
-    if (item.VendorId !== vendor.id) return res.status(403).json({ message: "Not your menu item" });
+      const { name, price, description } = req.body;
+      await item.update({
+        name: name ?? item.name,
+        price: (price === undefined || price === null) ? item.price : price,
+        description: description ?? item.description,
+      });
 
-    const { name, price, description } = req.body;
-    await item.update({
-      name: name ?? item.name,
-      price: (price === undefined || price === null) ? item.price : price,
-      description: description ?? item.description
-    });
-
-    res.json({ message: "Menu item updated", item });
-  } catch (err) {
-    res.status(500).json({ message: "Failed to update menu item", error: err.message });
+      res.json({ message: "Menu item updated", item });
+    } catch (err) {
+      res.status(500).json({ message: "Failed to update menu item", error: err.message });
+    }
   }
-});
+);
 
 // DELETE a menu item (ownership check)
-router.delete("/:id", authenticateToken, requireVendor, async (req, res) => {
-  try {
-    const vendor = await findVendorByUserId(req.user.id);
-    if (!vendor) return res.status(404).json({ message: "Vendor profile not found for this user" });
+router.delete(
+  "/:id",
+  authenticateToken,
+  requireVendor,
+  ensureVendorProfile,
+  async (req, res) => {
+    try {
+      const item = await MenuItem.findByPk(req.params.id);
+      if (!item) return res.status(404).json({ message: "Menu item not found" });
+      if (item.VendorId !== req.vendor.id)
+        return res.status(403).json({ message: "Not your menu item" });
 
-    const item = await MenuItem.findByPk(req.params.id);
-    if (!item) return res.status(404).json({ message: "Menu item not found" });
-    if (item.VendorId !== vendor.id) return res.status(403).json({ message: "Not your menu item" });
-
-    await item.destroy();
-    res.json({ message: "Menu item deleted" });
-  } catch (err) {
-    res.status(500).json({ message: "Failed to delete menu item", error: err.message });
+      await item.destroy();
+      res.json({ message: "Menu item deleted" });
+    } catch (err) {
+      res.status(500).json({ message: "Failed to delete menu item", error: err.message });
+    }
   }
-});
+);
 
 module.exports = router;
