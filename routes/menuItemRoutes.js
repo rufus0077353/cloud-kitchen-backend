@@ -1,4 +1,4 @@
-
+// routes/menuItemRoutes.js
 const express = require("express");
 const router = express.Router();
 const { MenuItem, Vendor } = require("../models");
@@ -29,7 +29,7 @@ router.post("/", authenticateToken, requireVendor, async (req, res) => {
     if (!vendor) return res.status(404).json({ message: "Vendor profile not found for this user" });
 
     const { name, price, description } = req.body;
-    if (!name || !price) {
+    if (!name || price === undefined || price === null) {
       return res.status(400).json({ message: "Name and price are required" });
     }
 
@@ -37,7 +37,7 @@ router.post("/", authenticateToken, requireVendor, async (req, res) => {
       name,
       price,
       description,
-      VendorId: vendor.id, // <-- from Vendor table
+      VendorId: vendor.id,
     });
 
     res.status(201).json({ message: "Menu item created", item });
@@ -57,7 +57,11 @@ router.put("/:id", authenticateToken, requireVendor, async (req, res) => {
     if (item.VendorId !== vendor.id) return res.status(403).json({ message: "Not your menu item" });
 
     const { name, price, description } = req.body;
-    await item.update({ name: name ?? item.name, price: price ?? item.price, description: description ?? item.description });
+    await item.update({
+      name: name ?? item.name,
+      price: (price === undefined || price === null) ? item.price : price,
+      description: description ?? item.description
+    });
 
     res.json({ message: "Menu item updated", item });
   } catch (err) {
