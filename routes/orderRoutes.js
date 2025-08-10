@@ -48,6 +48,7 @@ router.get(
         include: [
           { model: User, attributes: ["id", "name", "email"] },
           {
+            // Either OrderItems w/ MenuItem...
             model: OrderItem,
             include: [{ model: MenuItem, attributes: ["id", "name", "price"] }],
           },
@@ -88,25 +89,68 @@ router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
 /**
  * POST /api/orders
  * Create a new order with associated order items
+ * - Takes UserId from JWT (req.user.id)
+ * - Recalculates total on the server from menu item prices
  */
 router.post("/", authenticateToken, async (req, res) => {
-  const { UserId, VendorId, totalAmount, items } = req.body;
-
-  if (!UserId || !VendorId || totalAmount === undefined || !items?.length) {
-    return res
-      .status(400)
-      .json({ message: "UserId, VendorId, totalAmount and items are required" });
-  }
-
   try {
-    const order = await Order.create({ UserId, VendorId, totalAmount });
+    const { VendorId, items } = req.body;
 
+    if (!VendorId || !Array.isArray(items) || items.length === 0) {
+      return res
+        .status(400)
+        .json({ message: "VendorId and non-empty items are required" });
+    }
+
+    // Validate items and collect MenuItem IDs
+    const ids = [];
+    for (const it of items) {
+      if (
+        !it ||
+        typeof it.MenuItemId !== "number" ||
+        typeof it.quantity !== "number" ||
+        it.quantity <= 0
+      ) {
+        return res.status(400).json({
+          message:
+            "Each item must include a valid MenuItemId (number) and quantity (>0)",
+        });
+      }
+      ids.push(it.MenuItemId);
+    }
+
+    // Fetch prices, compute total server-side
+    const menuRows = await MenuItem.findAll({
+      where: { id: ids, VendorId }, // also ensure items belong to the same vendor
+      attributes: ["id", "price"],
+    });
+
+    if (menuRows.length !== ids.length) {
+      return res
+        .status(400)
+        .json({ message: "One or more menu items are invalid for this vendor" });
+    }
+
+    const priceMap = new Map(menuRows.map((m) => [m.id, m.price]));
+    const computedTotal = items.reduce((sum, it) => {
+      const price = priceMap.get(it.MenuItemId) || 0;
+      return sum + price * it.quantity;
+    }, 0);
+
+    // Create order with computed total
+    const order = await Order.create({
+      UserId: req.user.id,
+      VendorId,
+      totalAmount: computedTotal,
+      status: "pending",
+    });
+
+    // Persist order items
     const orderItems = items.map((item) => ({
       OrderId: order.id,
       MenuItemId: item.MenuItemId,
       quantity: item.quantity,
     }));
-
     await OrderItem.bulkCreate(orderItems);
 
     res.status(201).json({ message: "Order created", order });
@@ -118,6 +162,7 @@ router.post("/", authenticateToken, async (req, res) => {
 /**
  * PUT /api/orders/:id
  * Update order totalAmount and order items
+ * (Keeps your original behavior; if items change, recalculation can be added if you want)
  */
 router.put("/:id", authenticateToken, async (req, res) => {
   const { id } = req.params;
@@ -231,9 +276,12 @@ router.get("/:id/invoice", authenticateToken, async (req, res) => {
       <p><strong>User:</strong> ${order.User.name} (${order.User.email})</p>
       <p><strong>Vendor:</strong> ${order.Vendor.name} (${order.Vendor.cuisine})</p>
       <ul>
-        ${order.MenuItems.map(
-          (item) => `<li>${item.name} (x${item.OrderItem.quantity}) - ₹${item.price}</li>`
-        ).join("")}
+        ${order.MenuItems
+          .map(
+            (item) =>
+              `<li>${item.name} (x${item.OrderItem.quantity}) - ₹${item.price}</li>`
+          )
+          .join("")}
       </ul>
       <p><strong>Status:</strong> ${order.status}</p>
       <p><strong>Total Amount:</strong> ₹${order.totalAmount}</p>
