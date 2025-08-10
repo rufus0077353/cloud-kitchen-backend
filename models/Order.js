@@ -1,3 +1,4 @@
+// models/Order.js
 module.exports = (sequelize, DataTypes) => {
   const Order = sequelize.define("Order", {
     totalAmount: {
@@ -17,8 +18,10 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.INTEGER,
       allowNull: false,
     }
+  }, {
+    tableName: "orders",
+    timestamps: true,
   });
-
 
   return Order;
 };

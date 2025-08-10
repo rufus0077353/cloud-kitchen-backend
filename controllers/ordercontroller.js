@@ -1,76 +1,182 @@
-const db = require("../models"); // This imports index.js from models
-const { Order, OrderItem, MenuItem } = db;
 
-const createOrder = async (req, res) => {
+const db = require("../models");
+const { Order, OrderItem, MenuItem, Vendor, User } = db;
+const { Op } = require("sequelize");
+
+exports.createOrder = async (req, res) => {
   try {
-    const { userId, vendorId, items } = req.body; // items: [{ menuItemId, quantity }]
+    const { UserId, VendorId, totalAmount, items } = req.body;
 
-    // Create the order
-    const order = await Order.create({ userId, vendorId });
-
-    // Prepare order items
-    for (const item of items) {
-      const menuItem = await MenuItem.findByPk(item.menuItemId);
-      if (!menuItem) {
-        return res.status(404).json({ error: `Menu item not found: ID ${item.menuItemId}` });
-      }
-
-      await OrderItem.create({
-        OrderId: order.id,
-        MenuItemId: menuItem.id,
-        quantity: item.quantity,
-        priceAtOrder: menuItem.price,
-      });
+    if (!UserId || !VendorId || !totalAmount || !items?.length) {
+      return res.status(400).json({ message: "UserId, VendorId, totalAmount, and items are required" });
     }
 
-    return res.status(201).json({ message: "Order placed successfully", orderId: order.id });
-  } catch (error) {
-    console.error("Error creating order:", error);
-    return res.status(500).json({ error: "Failed to place order" });
+    const order = await Order.create({ UserId, VendorId, totalAmount });
+
+    const orderItems = items.map(item => ({
+      OrderId: order.id,
+      MenuItemId: item.MenuItemId,
+      quantity: item.quantity,
+    }));
+
+    await OrderItem.bulkCreate(orderItems);
+
+    res.status(201).json({ message: "Order created", order });
+  } catch (err) {
+    res.status(500).json({ message: "Error creating order", error: err.message });
   }
 };
 
-
-const getVendorOrders = async (req, res) => {
+exports.getMyOrders = async (req, res) => {
   try {
-    const vendorId = req.user.id; // Assuming vendor is authenticated
+    const orders = await Order.findAll({
+      where: { UserId: req.user.id },
+      include: [
+        { model: Vendor, attributes: ["id", "name", "cuisine"] },
+        {
+          model: MenuItem,
+          attributes: ["id", "name", "price"],
+          through: { attributes: ["quantity"] },
+        },
+      ],
+      order: [["createdAt", "DESC"]],
+    });
+    res.json(orders);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching user orders", error: err.message });
+  }
+};
+
+exports.getVendorOrders = async (req, res) => {
+  try {
+    const vendorId = req.params.vendorId;
 
     const orders = await Order.findAll({
-      where: { vendorId },
+      where: { VendorId: vendorId },
       include: [
-        { model: OrderItem, include: [MenuItem] },
-        { model: User, attributes: ['id', 'name', 'email'] }
+        { model: User, attributes: ["id", "name", "email"] },
+        {
+          model: MenuItem,
+          attributes: ["id", "name", "price"],
+          through: { attributes: ["quantity"] },
+        },
       ],
-      order: [['createdAt', 'DESC']]
+      order: [["createdAt", "DESC"]],
     });
-
-    return res.status(200).json({ orders });
-  } catch (error) {
-    console.error("Error fetching vendor orders:", error);
-    return res.status(500).json({ error: "Failed to fetch vendor orders" });
+    res.json(orders);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching vendor orders", error: err.message });
   }
 };
 
-const updateOrderStatus = async (req, res) => {
+exports.updateOrder = async (req, res) => {
   const { id } = req.params;
-  const { status } = req.body;
+  const { totalAmount, items } = req.body;
 
   try {
     const order = await Order.findByPk(id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
 
-    if (!order) return res.status(404).json({ error: 'Order not found' });
-
-    if (order.vendorId !== req.user.id) {
-      return res.status(403).json({ error: 'Not authorized to update this order' });
-    }
-
-    order.status = status;
+    if (totalAmount) order.totalAmount = totalAmount;
     await order.save();
 
-    return res.status(200).json({ message: 'Order status updated', order });
-  } catch (error) {
-    console.error("Error updating status:", error);
-    return res.status(500).json({ error: "Failed to update order status" });
+    if (items?.length) {
+      await OrderItem.destroy({ where: { OrderId: id } });
+
+      const orderItems = items.map(item => ({
+        OrderId: id,
+        MenuItemId: item.MenuItemId,
+        quantity: item.quantity,
+      }));
+
+      await OrderItem.bulkCreate(orderItems);
+    }
+
+    res.json({ message: "Order updated successfully", order });
+  } catch (err) {
+    res.status(500).json({ message: "Error updating order", error: err.message });
   }
 };
 
+exports.deleteOrder = async (req, res) => {
+  try {
+    const order = await Order.findByPk(req.params.id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    await OrderItem.destroy({ where: { OrderId: order.id } });
+    await order.destroy();
+
+    res.json({ message: "Order deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ message: "Error deleting order", error: err.message });
+  }
+};
+
+exports.filterOrders = async (req, res) => {
+  const { UserId, VendorId, status, startDate, endDate } = req.query;
+
+  const whereClause = {};
+  if (UserId) whereClause.UserId = UserId;
+  if (VendorId) whereClause.VendorId = VendorId;
+  if (status) whereClause.status = status;
+  if (startDate || endDate) {
+    whereClause.createdAt = {};
+    if (startDate) whereClause.createdAt[Op.gte] = new Date(startDate);
+    if (endDate) whereClause.createdAt[Op.lte] = new Date(endDate);
+  }
+
+  try {
+    const orders = await Order.findAll({
+      where: whereClause,
+      include: [
+        { model: User, attributes: ["id", "name", "email"] },
+        { model: Vendor, attributes: ["id", "name", "cuisine"] },
+        {
+          model: MenuItem,
+          attributes: ["id", "name", "price"],
+          through: { attributes: ["quantity"] },
+        },
+      ],
+      order: [["createdAt", "DESC"]],
+    });
+
+    res.json(orders);
+  } catch (err) {
+    res.status(500).json({ message: "Error filtering orders", error: err.message });
+  }
+};
+
+exports.getInvoice = async (req, res) => {
+  try {
+    const order = await Order.findByPk(req.params.id, {
+      include: [
+        { model: User, attributes: ["name", "email"] },
+        { model: Vendor, attributes: ["name", "cuisine"] },
+        {
+          model: MenuItem,
+          attributes: ["name", "price"],
+          through: { attributes: ["quantity"] },
+        },
+      ],
+    });
+
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    const html = `
+      <h2>Invoice for Order #${order.id}</h2>
+      <p><strong>User:</strong> ${order.User.name} (${order.User.email})</p>
+      <p><strong>Vendor:</strong> ${order.Vendor.name} (${order.Vendor.cuisine})</p>
+      <ul>
+        ${order.MenuItems.map(item =>
+          `<li>${item.name} (x${item.OrderItem.quantity}) - ₹${item.price}</li>`
+        ).join("")}
+      </ul>
+      <p><strong>Status:</strong> ${order.status}</p>
+      <p><strong>Total Amount:</strong> ₹${order.totalAmount}</p>
+    `;
+
+    res.send(html);
+  } catch (err) {
+    res.status(500).json({ message: "Error generating invoice", error: err.message });
+  }
+};
