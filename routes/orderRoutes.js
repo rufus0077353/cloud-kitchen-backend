@@ -2,10 +2,22 @@
 // routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
-const { Order, OrderItem, Vendor, MenuItem, User } = require("../models");
 const { Op } = require("sequelize");
+const { Order, OrderItem, Vendor, MenuItem, User } = require("../models");
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
+
+/**
+ * Helper to emit socket events (works whether helpers are on req or app)
+ */
+function emitToVendorHelper(req, vendorId, event, payload) {
+  const fn = req.emitToVendor || req.app.get("emitToVendor");
+  if (typeof fn === "function") fn(vendorId, event, payload);
+}
+function emitToUserHelper(req, userId, event, payload) {
+  const fn = req.emitToUser || req.app.get("emitToUser");
+  if (typeof fn === "function") fn(userId, event, payload);
+}
 
 /**
  * GET /api/orders/my
@@ -48,7 +60,7 @@ router.get(
         include: [
           { model: User, attributes: ["id", "name", "email"] },
           {
-            // Either OrderItems w/ MenuItem...
+            // show line items via OrderItem → MenuItem
             model: OrderItem,
             include: [{ model: MenuItem, attributes: ["id", "name", "price"] }],
           },
@@ -91,18 +103,17 @@ router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
  * Create a new order with associated order items
  * - Takes UserId from JWT (req.user.id)
  * - Recalculates total on the server from menu item prices
+ * - Emits "order:new" to the vendor room
  */
 router.post("/", authenticateToken, async (req, res) => {
   try {
     const { VendorId, items } = req.body;
 
     if (!VendorId || !Array.isArray(items) || items.length === 0) {
-      return res
-        .status(400)
-        .json({ message: "VendorId and non-empty items are required" });
+      return res.status(400).json({ message: "VendorId and non-empty items are required" });
     }
 
-    // Validate items and collect MenuItem IDs
+    // Validate items
     const ids = [];
     for (const it of items) {
       if (
@@ -112,32 +123,28 @@ router.post("/", authenticateToken, async (req, res) => {
         it.quantity <= 0
       ) {
         return res.status(400).json({
-          message:
-            "Each item must include a valid MenuItemId (number) and quantity (>0)",
+          message: "Each item must include a valid MenuItemId (number) and quantity (>0)",
         });
       }
       ids.push(it.MenuItemId);
     }
 
-    // Fetch prices, compute total server-side
+    // Ensure items belong to this vendor; fetch prices
     const menuRows = await MenuItem.findAll({
-      where: { id: ids, VendorId }, // also ensure items belong to the same vendor
-      attributes: ["id", "price"],
+      where: { id: ids, VendorId },
+      attributes: ["id", "price", "name"],
     });
-
     if (menuRows.length !== ids.length) {
-      return res
-        .status(400)
-        .json({ message: "One or more menu items are invalid for this vendor" });
+      return res.status(400).json({ message: "One or more menu items are invalid for this vendor" });
     }
 
-    const priceMap = new Map(menuRows.map((m) => [m.id, m.price]));
-    const computedTotal = items.reduce((sum, it) => {
-      const price = priceMap.get(it.MenuItemId) || 0;
-      return sum + price * it.quantity;
-    }, 0);
+    const priceMap = new Map(menuRows.map((m) => [m.id, Number(m.price) || 0]));
+    const computedTotal = items.reduce(
+      (sum, it) => sum + (priceMap.get(it.MenuItemId) || 0) * Number(it.quantity),
+      0
+    );
 
-    // Create order with computed total
+    // Create order
     const order = await Order.create({
       UserId: req.user.id,
       VendorId,
@@ -153,7 +160,22 @@ router.post("/", authenticateToken, async (req, res) => {
     }));
     await OrderItem.bulkCreate(orderItems);
 
-    res.status(201).json({ message: "Order created", order });
+    // Fetch full order for response + emit
+    const fullOrder = await Order.findByPk(order.id, {
+      include: [
+        { model: User, attributes: ["id", "name", "email"] },
+        { model: Vendor, attributes: ["id", "name", "cuisine"] },
+        {
+          model: OrderItem,
+          include: [{ model: MenuItem, attributes: ["id", "name", "price"] }],
+        },
+      ],
+    });
+
+    // 🔔 Notify vendor in real-time
+    emitToVendorHelper(req, VendorId, "order:new", fullOrder);
+
+    res.status(201).json({ message: "Order created", order: fullOrder });
   } catch (err) {
     res.status(500).json({ message: "Error creating order", error: err.message });
   }
@@ -162,7 +184,6 @@ router.post("/", authenticateToken, async (req, res) => {
 /**
  * PUT /api/orders/:id
  * Update order totalAmount and order items
- * (Keeps your original behavior; if items change, recalculation can be added if you want)
  */
 router.put("/:id", authenticateToken, async (req, res) => {
   const { id } = req.params;
@@ -175,7 +196,7 @@ router.put("/:id", authenticateToken, async (req, res) => {
     if (totalAmount !== undefined) order.totalAmount = totalAmount;
     await order.save();
 
-    if (items?.length) {
+    if (Array.isArray(items) && items.length) {
       await OrderItem.destroy({ where: { OrderId: id } });
 
       const orderItems = items.map((item) => ({
@@ -296,6 +317,7 @@ router.get("/:id/invoice", authenticateToken, async (req, res) => {
 /**
  * PATCH /api/orders/:id/status
  * Vendor updates order status (accepted/rejected/ready/delivered)
+ * - Emits to both vendor and user rooms
  */
 router.patch(
   "/:id/status",
@@ -321,6 +343,10 @@ router.patch(
 
       order.status = status;
       await order.save();
+
+      // 🔔 notify vendor and user
+      emitToVendorHelper(req, order.VendorId, "order:status", { id: order.id, status: order.status });
+      emitToUserHelper(req, order.UserId, "order:status", { id: order.id, status: order.status, UserId: order.UserId });
 
       res.json({ message: "Status updated", order });
     } catch (err) {
