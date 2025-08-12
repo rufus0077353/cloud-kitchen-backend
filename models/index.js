@@ -11,6 +11,7 @@ db.Vendor = require("./Vendor")(sequelize, Sequelize.DataTypes);
 db.MenuItem = require("./MenuItem")(sequelize, Sequelize.DataTypes);
 db.Order = require("./Order")(sequelize, Sequelize.DataTypes);
 db.OrderItem = require("./OrderItem")(sequelize, Sequelize.DataTypes);
+db.PushSubscription = require("./PushSubscription")(sequelize, Sequelize.DataTypes);
 
 /**
  * Associations — single source of truth
@@ -41,6 +42,9 @@ db.OrderItem.belongsTo(db.Order, { foreignKey: "OrderId" });
 // MenuItem ↔ OrderItem (1:M)
 db.MenuItem.hasMany(db.OrderItem, { foreignKey: "MenuItemId", onDelete: "CASCADE" });
 db.OrderItem.belongsTo(db.MenuItem, { foreignKey: "MenuItemId" });
+
+db.User.hasMany(db.PushSubscription, { foreignKey: "userId", onDelete: "CASCADE" });
+db.PushSubscription.belongsTo(db.User, { foreignKey: "userId" });
 
 // Optional: Order ↔ MenuItem (M:N) via OrderItem (explicit keys)
 db.Order.belongsToMany(db.MenuItem, {

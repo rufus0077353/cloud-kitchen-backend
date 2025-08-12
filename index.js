@@ -1,3 +1,4 @@
+
 // index.js
 require("dotenv").config();
 
@@ -6,28 +7,35 @@ const cors = require("cors");
 const http = require("http");
 const { Server } = require("socket.io");
 
-// Initialize DB (adjust path if your setup differs)
-const sequelize = require("./db"); // if you use ./config/db, point to that
-const db = require("./models");
+// ---- DB ----
+const db = require("./models");          // Sequelize models (includes sequelize instance)
+const sequelize = require("./db");       // If you initialize the connection in ./db
 
 // ---- Express app ----
 const app = express();
 
-// ✅ Allowed frontends (fix: split the merged string)
-const FRONTENDS = [
+// Allowed frontend origins (env first, fallback to known hosts)
+const DEFAULT_ORIGINS = [
   "https://servezy.in",
   "https://glistening-taffy-7be8bf.netlify.app",
-  "http://localhost:3000",
+  "http://localhost:3000"
 ];
+const FRONTENDS = (process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(",")
+  : DEFAULT_ORIGINS
+).map(s => s.trim()).filter(Boolean);
 
-app.use(
-  cors({
-    origin: FRONTENDS,
-    credentials: true,
-    methods: "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS",
-    allowedHeaders: "Content-Type, Authorization, X-Requested-With",
-  })
-);
+// CORS (robust: allow same-origin/health checks with no Origin header)
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true); // e.g., curl, server-to-server, health checks
+    return FRONTENDS.includes(origin) ? cb(null, true) : cb(new Error("Not allowed by CORS"));
+  },
+  credentials: true,
+  methods: "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS",
+  allowedHeaders: "Content-Type, Authorization, X-Requested-With"
+}));
+
 app.use(express.json());
 
 // ---- HTTP + Socket.IO ----
@@ -36,38 +44,32 @@ const io = new Server(server, {
   cors: {
     origin: FRONTENDS,
     methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
-    credentials: true,
-  },
+    credentials: true
+  }
 });
 
-// Expose io + emit helpers to routes/controllers
-app.set("io", io);
-app.set("emitToVendor", (vendorId, event, payload) => {
+// Expose io + helpers so routes/controllers can emit easily
+const emitToVendor = (vendorId, event, payload) => {
   if (!vendorId) return;
   io.to(`vendor:${vendorId}`).emit(event, payload);
-});
-app.set("emitToUser", (userId, event, payload) => {
+};
+const emitToUser = (userId, event, payload) => {
   if (!userId) return;
   io.to(`user:${userId}`).emit(event, payload);
-});
+};
+app.set("io", io);
+app.set("emitToVendor", emitToVendor);
+app.set("emitToUser", emitToUser);
 
-// Rooms: vendors & users join after the client authenticates
+// Socket rooms: vendors & users join after client identifies itself
 io.on("connection", (socket) => {
-  // Join vendor room
   socket.on("vendor:join", (vendorId) => {
-    if (!vendorId) return;
-    socket.join(`vendor:${vendorId}`);
+    if (vendorId) socket.join(`vendor:${vendorId}`);
   });
-
-  // Join user room
   socket.on("user:join", (userId) => {
-    if (!userId) return;
-    socket.join(`user:${userId}`);
+    if (userId) socket.join(`user:${userId}`);
   });
-
-  socket.on("disconnect", () => {
-    // no-op
-  });
+  socket.on("disconnect", () => {});
 });
 
 // ---- Routes ----
@@ -77,30 +79,23 @@ const menuItemRoutes = require("./routes/menuItemRoutes");
 const orderRoutes = require("./routes/orderRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 
-console.log("✅ Registering auth routes");
 app.use("/api/auth", authRoutes);
-
-console.log("✅ Registering vendor routes");
 app.use("/api/vendors", vendorRoutes);
-
-console.log("✅ Registering menu item routes");
 app.use("/api/menu-items", menuItemRoutes);
 
-console.log("✅ Registering order routes");
-app.use("/api/orders", (req, res, next) => {
-  // Make emit helpers available on req for convenience
+// Attach emit helpers to /api/orders only (so you can use req.emitToVendor/User)
+app.use("/api/orders", (req, _res, next) => {
   req.io = io;
-  req.emitToVendor = app.get("emitToVendor");
-  req.emitToUser = app.get("emitToUser");
+  req.emitToVendor = emitToVendor;
+  req.emitToUser = emitToUser;
   next();
 }, orderRoutes);
 
-console.log("✅ Registering admin routes");
 app.use("/api/admin", adminRoutes);
 
 // Health & root
-app.get("/ping", (req, res) => res.send("pong"));
-app.get("/", (req, res) => res.send("✅ Cloud Kitchen Backend is live!"));
+app.get("/ping", (_req, res) => res.send("pong"));
+app.get("/", (_req, res) => res.send("✅ Cloud Kitchen Backend is live!"));
 
 // 404 fallback
 app.use((req, res) => res.status(404).json({ message: "Route not found" }));
@@ -108,19 +103,16 @@ app.use((req, res) => res.status(404).json({ message: "Route not found" }));
 // ---- Start ----
 const PORT = process.env.PORT || 5000;
 
-db.sequelize
-  .sync({ alter: true })
+db.sequelize.sync({ alter: true })
   .then(async () => {
     console.log("✅ DB synced successfully");
-
-    // Optional: list tables once at boot
     try {
       const tables = await db.sequelize.getQueryInterface().showAllTables();
       console.log("🧩 Tables in DB:", tables);
     } catch {}
-
     server.listen(PORT, () => {
       console.log(`🚀 Server (HTTP + Socket.IO) listening on port ${PORT}`);
+      console.log("🌐 Allowed origins:", FRONTENDS.join(", "));
       console.log("✅ Connecting to database:", process.env.DB_NAME);
     });
   })
