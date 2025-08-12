@@ -15,35 +15,48 @@ require("./db");                          // (ok if your connection is initializ
 const app = express();
 
 // Allowed frontend origins (env first, fallback to known hosts)
+
+// --- before: your existing origins list ---
 const DEFAULT_ORIGINS = [
   "https://servezy.in",
   "https://glistening-taffy-7be8bf.netlify.app",
-  "http://localhost:3000",
+  "http://localhost:3000"
 ];
 const FRONTENDS = (process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(",")
   : DEFAULT_ORIGINS
-).map((s) => s.trim()).filter(Boolean);
+).map(s => s.trim()).filter(Boolean);
 
-// CORS (allow no-Origin requests for health checks)
+// Trust proxy (Render/Heroku/NGINX) so websocket upgrade works well
+app.set("trust proxy", 1);
+
+// CORS for HTTP routes
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin) return cb(null, true);
+    if (!origin) return cb(null, true);       // health checks / curl / same-origin
     return FRONTENDS.includes(origin) ? cb(null, true) : cb(new Error("Not allowed by CORS"));
   },
   credentials: true,
   methods: "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS",
-  allowedHeaders: "Content-Type, Authorization, X-Requested-With",
+  allowedHeaders: "Content-Type, Authorization, X-Requested-With"
 }));
 app.use(express.json());
 
-// ---- HTTP + Socket.IO ----
+// --- HTTP server + Socket.IO ---
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: FRONTENDS, credentials: true },
+  path: "/socket.io",
+  cors: {
+    origin: FRONTENDS,
+    methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
+    credentials: true
+  },
+  // These two reduce spurious disconnect banners on slow networks
+  pingInterval: 25000,  // default 25000; keep explicit
+  pingTimeout: 60000,   // give the client up to 60s to respond
 });
 
-// Expose io + helpers so routes/controllers can emit easily
+// expose helpers (unchanged if you already had them)
 const emitToVendor = (vendorId, event, payload) => {
   if (!vendorId) return;
   io.to(`vendor:${vendorId}`).emit(event, payload);
@@ -56,10 +69,16 @@ app.set("io", io);
 app.set("emitToVendor", emitToVendor);
 app.set("emitToUser", emitToUser);
 
-// Socket rooms
+// Rooms
 io.on("connection", (socket) => {
+  console.log("🔌 socket connected", socket.id);
+
   socket.on("vendor:join", (vendorId) => vendorId && socket.join(`vendor:${vendorId}`));
-  socket.on("user:join", (userId) => userId && socket.join(`user:${userId}`));
+  socket.on("user:join",   (userId)   => userId   && socket.join(`user:${userId}`));
+
+  socket.on("disconnect", (reason) => {
+    console.log("🔌 socket disconnected:", reason);
+  });
 });
 
 // ---- Routes ----
