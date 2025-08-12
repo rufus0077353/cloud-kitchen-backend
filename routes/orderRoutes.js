@@ -1,4 +1,3 @@
-
 // routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
@@ -6,8 +5,8 @@ const { Op } = require("sequelize");
 const { Order, OrderItem, Vendor, MenuItem, User } = require("../models");
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
-const { PushSubscription, Vendor } = require("../models");
-const { sendPush, VAPID_PUBLIC_KEY } = require("../utils/push");
+
+// NOTE: Removed duplicate Vendor import and unused PushSubscription/sendPush imports
 
 /**
  * Helper to emit socket events (works whether helpers are on req or app)
@@ -78,7 +77,6 @@ router.get(
 
 /**
  * (Optional) GET /api/orders/vendor/:vendorId
- * Orders for a specific vendor id (keep only if you need it)
  */
 router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
   try {
@@ -105,7 +103,7 @@ router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
  * Create a new order with associated order items
  * - Takes UserId from JWT (req.user.id)
  * - Recalculates total on the server from menu item prices
- * - Emits "order:new" to the vendor room
+ * - Emits "order:new" to vendor and user rooms
  */
 router.post("/", authenticateToken, async (req, res) => {
   try {
@@ -118,12 +116,7 @@ router.post("/", authenticateToken, async (req, res) => {
     // Validate items
     const ids = [];
     for (const it of items) {
-      if (
-        !it ||
-        typeof it.MenuItemId !== "number" ||
-        typeof it.quantity !== "number" ||
-        it.quantity <= 0
-      ) {
+      if (!it || typeof it.MenuItemId !== "number" || typeof it.quantity !== "number" || it.quantity <= 0) {
         return res.status(400).json({
           message: "Each item must include a valid MenuItemId (number) and quantity (>0)",
         });
@@ -174,8 +167,9 @@ router.post("/", authenticateToken, async (req, res) => {
       ],
     });
 
-    // 🔔 Notify vendor in real-time
+    // 🔔 Notify vendor and user in real-time
     emitToVendorHelper(req, VendorId, "order:new", fullOrder);
+    emitToUserHelper(req, req.user.id, "order:new", fullOrder);
 
     res.status(201).json({ message: "Order created", order: fullOrder });
   } catch (err) {
@@ -300,10 +294,7 @@ router.get("/:id/invoice", authenticateToken, async (req, res) => {
       <p><strong>Vendor:</strong> ${order.Vendor.name} (${order.Vendor.cuisine})</p>
       <ul>
         ${order.MenuItems
-          .map(
-            (item) =>
-              `<li>${item.name} (x${item.OrderItem.quantity}) - ₹${item.price}</li>`
-          )
+          .map((item) => `<li>${item.name} (x${item.OrderItem.quantity}) - ₹${item.price}</li>`)
           .join("")}
       </ul>
       <p><strong>Status:</strong> ${order.status}</p>
