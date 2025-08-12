@@ -6,6 +6,8 @@ const { Op } = require("sequelize");
 const { Order, OrderItem, Vendor, MenuItem, User } = require("../models");
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
+const { PushSubscription, Vendor } = require("../models");
+const { sendPush, VAPID_PUBLIC_KEY } = require("../utils/push");
 
 /**
  * Helper to emit socket events (works whether helpers are on req or app)
