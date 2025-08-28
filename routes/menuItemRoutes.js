@@ -5,6 +5,7 @@ const router = express.Router();
 const { MenuItem } = require("../models");
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
+const { or } = require("sequelize");
 
 // GET all menu items for THIS vendor
 router.get(
@@ -14,7 +15,10 @@ router.get(
   ensureVendorProfile,
   async (req, res) => {
     try {
-      const items = await MenuItem.findAll({ where: { VendorId: req.vendor.id } });
+      const items = await MenuItem.findAll({
+        where: { VendorId: req.vendor.id },
+        order: [["createdAt", "DESC"]]
+      });
       res.json(items);
     } catch (err) {
       res.status(500).json({ message: "Failed to fetch menu items", error: err.message });
@@ -44,15 +48,17 @@ router.post(
   ensureVendorProfile,
   async (req, res) => {
     try {
-      const { name, price, description } = req.body;
-      if (!name || price === undefined || price === null) {
+      const { name, price, description, isAvailable } = req.body || {};
+      const priceNum = Number(price);
+      if (!name || Number.isNaN(priceNum)) {
         return res.status(400).json({ message: "Name and price are required" });
       }
 
       const item = await MenuItem.create({
         name,
-        price,
+        price: priceNum,
         description,
+        isAvailable: typeof isAvailable === "boolean" ? isAvailable : true,
         VendorId: req.vendor.id,
       });
 
@@ -76,11 +82,14 @@ router.put(
       if (item.VendorId !== req.vendor.id)
         return res.status(403).json({ message: "Not your menu item" });
 
-      const { name, price, description } = req.body;
+      const { name, price, description, isAvailable } = req.body || {};
+      const proceNum = price !== undefined ? Number(price) : undefined;
+
       await item.update({
         name: name ?? item.name,
-        price: (price === undefined || price === null) ? item.price : price,
+        price: proceNum === undefined || Number.isNaN(proceNum) ? item.price : proceNum,
         description: description ?? item.description,
+        isAvailable: typeof isAvailable === "boolean" ? isAvailable : item.isAvailable,
       });
 
       res.json({ message: "Menu item updated", item });
