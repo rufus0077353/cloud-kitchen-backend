@@ -55,7 +55,9 @@ router.post("/", authenticateToken, async (req, res) => {
 // Keep only ONE version to avoid duplicates. Using :id.
 router.get("/:id/menu", async (req, res) => {
   try {
-    const items = await MenuItem.findAll({ where: { VendorId: req.params.id } });
+    const items = await MenuItem.findAll({ 
+      where: { VendorId: req.params.id, isAvailable: true }
+     });
     res.json(items); // array
   } catch (err) {
     res.status(500).json({ message: "Failed to fetch vendor menu", error: err.message });
