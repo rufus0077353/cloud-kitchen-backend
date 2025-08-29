@@ -24,16 +24,19 @@ router.get(
   }
 );
 
-// Public: GET items by vendorId (?vendorId=123)
+// Public list (optionally by vendor)
 router.get("/", async (req, res) => {
   try {
     const { vendorId } = req.query;
-    if (!vendorId) return res.json([]);
+    if (!vendorId) return res.json([]); // avoid huge accidental dumps
+    const idNum = Number(vendorId);
+    if (!Number.isFinite(idNum)) return res.json([]);
+
     const items = await MenuItem.findAll({
-      where: { VendorId: vendorId, isAvailable: true }, // only show available to users
+      where: { VendorId: idNum, isAvailable: true },
       order: [["createdAt", "DESC"]],
     });
-    res.json(items);
+    res.json(items); // must be array
   } catch (err) {
     res.status(500).json({ message: "Failed to fetch menu items", error: err.message });
   }
@@ -49,9 +52,10 @@ router.post(
     try {
       const { name, price, description, isAvailable } = req.body || {};
       const priceNum = Number(price);
-      if (!name || Number.isNaN(priceNum)) {
+      if (!name || !Number.isFinite(priceNum)) {
         return res.status(400).json({ message: "Name and numeric price are required" });
       }
+
       const item = await MenuItem.create({
         name,
         price: priceNum,
@@ -59,6 +63,7 @@ router.post(
         isAvailable: typeof isAvailable === "boolean" ? isAvailable : true,
         VendorId: req.vendor.id,
       });
+
       res.status(201).json({ message: "Menu item created", item });
     } catch (err) {
       res.status(500).json({ message: "Failed to create menu item", error: err.message });

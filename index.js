@@ -16,6 +16,7 @@ const app = express();
 // Allowed frontend origins (env first, fallback to known hosts)
 const DEFAULT_ORIGINS = [
   "https://servezy.in",
+  "https://www.servezy.in",
   "https://glistening-taffy-7be8bf.netlify.app",
   "http://localhost:3000"
 ];
