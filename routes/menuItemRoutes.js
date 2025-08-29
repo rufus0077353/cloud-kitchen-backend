@@ -1,4 +1,3 @@
-// routes/menuItemRoutes.js
 const express = require("express");
 const router = express.Router();
 const { MenuItem } = require("../models");
@@ -28,7 +27,7 @@ router.get(
 router.get("/", async (req, res) => {
   try {
     const { vendorId } = req.query;
-    if (!vendorId) return res.json([]); // avoid huge accidental dumps
+    if (!vendorId) return res.json([]);
     const idNum = Number(vendorId);
     if (!Number.isFinite(idNum)) return res.json([]);
 
@@ -36,13 +35,13 @@ router.get("/", async (req, res) => {
       where: { VendorId: idNum, isAvailable: true },
       order: [["createdAt", "DESC"]],
     });
-    res.json(items); // must be array
+    res.json(items);
   } catch (err) {
     res.status(500).json({ message: "Failed to fetch menu items", error: err.message });
   }
 });
 
-// CREATE a new menu item (derive VendorId from ensured profile)
+// CREATE (derive VendorId from ensured profile)
 router.post(
   "/",
   authenticateToken,
@@ -71,7 +70,7 @@ router.post(
   }
 );
 
-// UPDATE a menu item (ownership check)
+// UPDATE (ownership check)
 router.put(
   "/:id",
   authenticateToken,
@@ -100,7 +99,7 @@ router.put(
   }
 );
 
-// DELETE a menu item (ownership check)
+// DELETE (ownership check)
 router.delete(
   "/:id",
   authenticateToken,
