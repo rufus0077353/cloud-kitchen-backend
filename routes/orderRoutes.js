@@ -2,7 +2,7 @@
 const express = require("express");
 const router = express.Router();
 const { Op } = require("sequelize");
-const { Order, OrderItem, Vendor, MenuItem, User, sequelize } = require("../models");
+const { Order, OrderItem, Vendor, MenuItem, User } = require("../models");
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 
@@ -74,96 +74,78 @@ router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
   }
 });
 
-/** POST /api/orders — user must be logged in */
+// POST /api/orders  (user must be logged in)
 router.post("/", authenticateToken, async (req, res) => {
-  const t = await sequelize.transaction();
   try {
     const { VendorId, items } = req.body;
 
     // 1) Validate basic shape
     const vendorIdNum = Number(VendorId);
     if (!Number.isFinite(vendorIdNum)) {
-      await t.rollback();
-      return res.status(400).json({ message: "VendorId must be a number" });
+      return res.status(400).json({ message: "VendorId must be a number", got: VendorId });
     }
     if (!Array.isArray(items) || items.length === 0) {
-      await t.rollback();
       return res.status(400).json({ message: "At least one item is required" });
     }
 
-    // Ensure vendor actually exists (clearer errors)
-    const vendor = await Vendor.findByPk(vendorIdNum, { transaction: t });
-    if (!vendor) {
-      await t.rollback();
-      return res.status(400).json({ message: "Selected vendor does not exist" });
-    }
-
-    // 2) Validate items shape
+    // 2) Validate items shape + coerce
     const ids = [];
+    const cleanItems = [];
     for (const it of items) {
       const mid = Number(it?.MenuItemId);
       const qty = Number(it?.quantity);
       if (!Number.isFinite(mid) || !Number.isFinite(qty) || qty <= 0) {
-        await t.rollback();
         return res.status(400).json({
           message: "Each item must include numeric MenuItemId and quantity (>0)",
+          got: it,
         });
       }
       ids.push(mid);
+      cleanItems.push({ MenuItemId: mid, quantity: qty });
     }
 
     // 3) Make sure all items exist AND belong to the selected vendor
     const menuRows = await MenuItem.findAll({
-      where: {
-        id: { [Op.in]: ids },
-        VendorId: vendorIdNum,
-      },
+      where: { id: ids, VendorId: vendorIdNum },
       attributes: ["id", "price", "name", "VendorId"],
-      transaction: t,
     });
 
+    const foundIds = menuRows.map(m => Number(m.id));
     if (menuRows.length !== ids.length) {
-      // compute which IDs failed
-      const foundIds = new Set(menuRows.map(m => Number(m.id)));
-      const invalidItemIds = ids.filter(id => !foundIds.has(id));
-      await t.rollback();
+      // tell exactly what is missing/wrong
+      const missing = ids.filter(id => !foundIds.includes(id));
       return res.status(400).json({
-        message:
-          "One or more items are invalid for this vendor (check menu item → vendor mapping).",
-        invalidItemIds,
+        message: "One or more items are invalid for this vendor (check menu item -> vendor mapping).",
         vendorId: vendorIdNum,
+        requestedItemIds: ids,
+        foundForVendor: foundIds,
+        missingForVendor: missing,
       });
     }
 
-    // 4) Compute total on the server from authoritative prices
+    // 4) Compute total server-side
     const priceMap = new Map(menuRows.map(m => [Number(m.id), Number(m.price) || 0]));
-    const computedTotal = items.reduce(
-      (sum, it) =>
-        sum + (priceMap.get(Number(it.MenuItemId)) || 0) * Number(it.quantity),
+    const computedTotal = cleanItems.reduce(
+      (sum, it) => sum + (priceMap.get(it.MenuItemId) || 0) * it.quantity,
       0
     );
 
     // 5) Create order
-    const order = await Order.create(
-      {
-        UserId: req.user.id,
-        VendorId: vendorIdNum,
-        totalAmount: computedTotal,
-        status: "pending",
-      },
-      { transaction: t }
-    );
+    const order = await Order.create({
+      UserId: req.user.id,
+      VendorId: vendorIdNum,
+      totalAmount: computedTotal,
+      status: "pending",
+    });
 
     // 6) Create line items
-    const orderItems = items.map((it) => ({
-      OrderId: order.id,
-      MenuItemId: Number(it.MenuItemId),
-      quantity: Number(it.quantity),
-    }));
-    await OrderItem.bulkCreate(orderItems, { transaction: t });
-
-    // Commit before emit/load (so subsequent read sees the data)
-    await t.commit();
+    await OrderItem.bulkCreate(
+      cleanItems.map(it => ({
+        OrderId: order.id,
+        MenuItemId: it.MenuItemId,
+        quantity: it.quantity,
+      }))
+    );
 
     // 7) Reload full order for response + socket
     const fullOrder = await Order.findByPk(order.id, {
@@ -174,12 +156,13 @@ router.post("/", authenticateToken, async (req, res) => {
       ],
     });
 
-    emitToVendorHelper(req, vendorIdNum, "order:new", fullOrder);
-    emitToUserHelper(req, req.user.id, "order:new", fullOrder);
+    const emitToVendor = req.emitToVendor || req.app.get("emitToVendor");
+    const emitToUser = req.emitToUser || req.app.get("emitToUser");
+    if (typeof emitToVendor === "function") emitToVendor(vendorIdNum, "order:new", fullOrder);
+    if (typeof emitToUser === "function")  emitToUser(req.user.id, "order:new", fullOrder);
 
     return res.status(201).json({ message: "Order created", order: fullOrder });
   } catch (err) {
-    await t.rollback();
     console.error("POST /api/orders error:", err?.name, err?.message, err?.stack);
     if (err?.name === "SequelizeForeignKeyConstraintError") {
       return res.status(400).json({
@@ -208,13 +191,11 @@ router.put("/:id", authenticateToken, async (req, res) => {
 
     if (Array.isArray(items) && items.length) {
       await OrderItem.destroy({ where: { OrderId: id } });
-      await OrderItem.bulkCreate(
-        items.map((it) => ({
-          OrderId: id,
-          MenuItemId: it.MenuItemId,
-          quantity: it.quantity,
-        }))
-      );
+      await OrderItem.bulkCreate(items.map((it) => ({
+        OrderId: id,
+        MenuItemId: it.MenuItemId,
+        quantity: it.quantity,
+      })));
     }
     res.json({ message: "Order updated successfully", order });
   } catch (err) {
@@ -248,7 +229,7 @@ router.get("/filter", authenticateToken, async (req, res) => {
   if (startDate || endDate) {
     where.createdAt = {};
     if (startDate) where.createdAt[Op.gte] = new Date(startDate);
-    if (endDate) where.createdAt[Op.lte] = new Date(endDate);
+    if (endDate)   where.createdAt[Op.lte] = new Date(endDate);
   }
 
   try {
