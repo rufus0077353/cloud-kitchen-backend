@@ -1,4 +1,3 @@
-// models/Order.js
 module.exports = (sequelize, DataTypes) => {
   const Order = sequelize.define("Order", {
     totalAmount: { type: DataTypes.FLOAT,  allowNull: false },

@@ -1,5 +1,4 @@
 
-// models/index.js
 const Sequelize = require("sequelize");
 const sequelize = require("../config/db");
 
@@ -7,7 +6,7 @@ const db = {};
 db.Sequelize = Sequelize;
 db.sequelize = sequelize;
 
-// Load models
+// Models
 db.User             = require("./User")(sequelize, Sequelize.DataTypes);
 db.Vendor           = require("./Vendor")(sequelize, Sequelize.DataTypes);
 db.MenuItem         = require("./MenuItem")(sequelize, Sequelize.DataTypes);
@@ -25,11 +24,11 @@ db.Vendor.belongsTo(db.User, { foreignKey: "UserId" });
 db.Vendor.hasMany(db.MenuItem, { foreignKey: "VendorId", onDelete: "CASCADE" });
 db.MenuItem.belongsTo(db.Vendor, { foreignKey: "VendorId" });
 
-// User ↔ Order (1:M) — protect history
+// User ↔ Order (1:M)
 db.User.hasMany(db.Order,   { foreignKey: "UserId",   onDelete: "RESTRICT" });
 db.Order.belongsTo(db.User, { foreignKey: "UserId" });
 
-// Vendor ↔ Order (1:M) — protect history
+// Vendor ↔ Order (1:M)
 db.Vendor.hasMany(db.Order,   { foreignKey: "VendorId", onDelete: "RESTRICT" });
 db.Order.belongsTo(db.Vendor, { foreignKey: "VendorId" });
 
@@ -45,7 +44,7 @@ db.OrderItem.belongsTo(db.MenuItem, { foreignKey: "MenuItemId" });
 db.User.hasMany(db.PushSubscription, { foreignKey: "userId", onDelete: "CASCADE" });
 db.PushSubscription.belongsTo(db.User, { foreignKey: "userId" });
 
-// Convenience M:N: Orders ↔ MenuItems via OrderItem
+// Convenience M:N
 db.Order.belongsToMany(db.MenuItem, {
   through: db.OrderItem,
   foreignKey: "OrderId",

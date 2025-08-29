@@ -91,7 +91,7 @@ router.put("/:id", authenticateToken, async (req, res) => {
   }
 });
 
-// Delete vendor (hard)
+// Delete vendor
 router.delete("/:id", authenticateToken, async (req, res) => {
   try {
     const vendor = await Vendor.findByPk(req.params.id);

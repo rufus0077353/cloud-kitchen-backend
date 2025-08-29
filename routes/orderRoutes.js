@@ -74,7 +74,7 @@ router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/orders  (user must be logged in)
+// POST /api/orders — user must be logged in
 router.post("/", authenticateToken, async (req, res) => {
   try {
     const { VendorId, items } = req.body;
@@ -104,7 +104,7 @@ router.post("/", authenticateToken, async (req, res) => {
       cleanItems.push({ MenuItemId: mid, quantity: qty });
     }
 
-    // 3) Make sure all items exist AND belong to the selected vendor
+    // 3) Ensure all items belong to the selected vendor
     const menuRows = await MenuItem.findAll({
       where: { id: ids, VendorId: vendorIdNum },
       attributes: ["id", "price", "name", "VendorId"],
@@ -112,7 +112,6 @@ router.post("/", authenticateToken, async (req, res) => {
 
     const foundIds = menuRows.map(m => Number(m.id));
     if (menuRows.length !== ids.length) {
-      // tell exactly what is missing/wrong
       const missing = ids.filter(id => !foundIds.includes(id));
       return res.status(400).json({
         message: "One or more items are invalid for this vendor (check menu item -> vendor mapping).",
@@ -156,14 +155,12 @@ router.post("/", authenticateToken, async (req, res) => {
       ],
     });
 
-    const emitToVendor = req.emitToVendor || req.app.get("emitToVendor");
-    const emitToUser = req.emitToUser || req.app.get("emitToUser");
-    if (typeof emitToVendor === "function") emitToVendor(vendorIdNum, "order:new", fullOrder);
-    if (typeof emitToUser === "function")  emitToUser(req.user.id, "order:new", fullOrder);
+    emitToVendorHelper(req, vendorIdNum, "order:new", fullOrder);
+    emitToUserHelper(req, req.user.id, "order:new", fullOrder);
 
     return res.status(201).json({ message: "Order created", order: fullOrder });
   } catch (err) {
-    console.error("POST /api/orders error:", err?.name, err?.message, err?.stack);
+    console.error("POST /api/orders error:", err?.name, err?.message);
     if (err?.name === "SequelizeForeignKeyConstraintError") {
       return res.status(400).json({
         message: "Invalid foreign key (user/vendor/menu item mismatch). Check payload IDs.",

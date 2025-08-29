@@ -1,4 +1,3 @@
-// models/MenuItem.js
 module.exports = (sequelize, DataTypes) => {
   const MenuItem = sequelize.define("MenuItem", {
     name:        { type: DataTypes.STRING, allowNull: false },
