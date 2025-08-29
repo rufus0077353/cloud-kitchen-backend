@@ -1,4 +1,3 @@
-
 // routes/menuItemRoutes.js
 const express = require("express");
 const router = express.Router();
@@ -7,7 +6,8 @@ const { authenticateToken, requireVendor } = require("../middleware/authMiddlewa
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 
 // GET all menu items for THIS vendor
-router.get("/mine",
+router.get(
+  "/mine",
   authenticateToken,
   requireVendor,
   ensureVendorProfile,
@@ -24,20 +24,24 @@ router.get("/mine",
   }
 );
 
-// Public: GET menu items for a vendor (expects vendorId query)
+// Public: GET items by vendorId (?vendorId=123)
 router.get("/", async (req, res) => {
   try {
     const { vendorId } = req.query;
     if (!vendorId) return res.json([]);
-    const items = await MenuItem.findAll({ where: { VendorId: vendorId } });
+    const items = await MenuItem.findAll({
+      where: { VendorId: vendorId, isAvailable: true }, // only show available to users
+      order: [["createdAt", "DESC"]],
+    });
     res.json(items);
   } catch (err) {
     res.status(500).json({ message: "Failed to fetch menu items", error: err.message });
   }
 });
 
-// CREATE a new menu item (derive VendorId from vendor profile)
-router.post("/",
+// CREATE a new menu item (derive VendorId from ensured profile)
+router.post(
+  "/",
   authenticateToken,
   requireVendor,
   ensureVendorProfile,
@@ -46,9 +50,8 @@ router.post("/",
       const { name, price, description, isAvailable } = req.body || {};
       const priceNum = Number(price);
       if (!name || Number.isNaN(priceNum)) {
-        return res.status(400).json({ message: "Name and price are required" });
+        return res.status(400).json({ message: "Name and numeric price are required" });
       }
-
       const item = await MenuItem.create({
         name,
         price: priceNum,
@@ -56,7 +59,6 @@ router.post("/",
         isAvailable: typeof isAvailable === "boolean" ? isAvailable : true,
         VendorId: req.vendor.id,
       });
-
       res.status(201).json({ message: "Menu item created", item });
     } catch (err) {
       res.status(500).json({ message: "Failed to create menu item", error: err.message });
@@ -65,7 +67,8 @@ router.post("/",
 );
 
 // UPDATE a menu item (ownership check)
-router.put("/:id",
+router.put(
+  "/:id",
   authenticateToken,
   requireVendor,
   ensureVendorProfile,
@@ -79,8 +82,8 @@ router.put("/:id",
       const priceNum = price !== undefined ? Number(price) : undefined;
 
       await item.update({
-        name:        name ?? item.name,
-        price:       priceNum === undefined || Number.isNaN(priceNum) ? item.price : priceNum,
+        name: name ?? item.name,
+        price: priceNum === undefined || Number.isNaN(priceNum) ? item.price : priceNum,
         description: description ?? item.description,
         isAvailable: typeof isAvailable === "boolean" ? isAvailable : item.isAvailable,
       });
@@ -93,7 +96,8 @@ router.put("/:id",
 );
 
 // DELETE a menu item (ownership check)
-router.delete("/:id",
+router.delete(
+  "/:id",
   authenticateToken,
   requireVendor,
   ensureVendorProfile,
