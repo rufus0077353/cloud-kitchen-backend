@@ -74,65 +74,62 @@ router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
   }
 });
 
-/** POST /api/orders — create */
 
 // POST /api/orders  (user must be logged in)
 router.post("/", authenticateToken, async (req, res) => {
   try {
     const { VendorId, items } = req.body;
 
-    // Basic shape check
-    if (!Number.isFinite(Number(VendorId))) {
-      return res.status(400).json({ message: "VendorId is required and must be a number" });
+    // 1) Validate basic shape
+    const vendorIdNum = Number(VendorId);
+    if (!Number.isFinite(vendorIdNum)) {
+      return res.status(400).json({ message: "VendorId must be a number" });
     }
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ message: "At least one item is required" });
     }
 
-    // Validate each item shape
+    // 2) Validate items shape
     const ids = [];
     for (const it of items) {
-      if (
-        !it ||
-        !Number.isFinite(Number(it.MenuItemId)) ||
-        !Number.isFinite(Number(it.quantity)) ||
-        Number(it.quantity) <= 0
-      ) {
+      const mid = Number(it?.MenuItemId);
+      const qty = Number(it?.quantity);
+      if (!Number.isFinite(mid) || !Number.isFinite(qty) || qty <= 0) {
         return res.status(400).json({
           message: "Each item must include numeric MenuItemId and quantity (>0)",
         });
       }
-      ids.push(Number(it.MenuItemId));
+      ids.push(mid);
     }
 
-    // Fetch menu rows and ensure they belong to this vendor
+    // 3) Make sure all items exist AND belong to the selected vendor
     const menuRows = await MenuItem.findAll({
-      where: { id: ids, VendorId: Number(VendorId) },
+      where: { id: ids, VendorId: vendorIdNum },
       attributes: ["id", "price", "name", "VendorId"],
     });
-
     if (menuRows.length !== ids.length) {
       return res.status(400).json({
-        message: "One or more menu items are invalid for the selected vendor",
+        message:
+          "One or more items are invalid for this vendor (check menu item -> vendor mapping).",
       });
     }
 
-    // Compute total on server
+    // 4) Compute total on the server from authoritative prices
     const priceMap = new Map(menuRows.map((m) => [Number(m.id), Number(m.price) || 0]));
     const computedTotal = items.reduce(
       (sum, it) => sum + (priceMap.get(Number(it.MenuItemId)) || 0) * Number(it.quantity),
       0
     );
 
-    // Create order
+    // 5) Create order
     const order = await Order.create({
       UserId: req.user.id,
-      VendorId: Number(VendorId),
+      VendorId: vendorIdNum,
       totalAmount: computedTotal,
       status: "pending",
     });
 
-    // Persist items
+    // 6) Create line items
     const orderItems = items.map((it) => ({
       OrderId: order.id,
       MenuItemId: Number(it.MenuItemId),
@@ -140,27 +137,33 @@ router.post("/", authenticateToken, async (req, res) => {
     }));
     await OrderItem.bulkCreate(orderItems);
 
-    // Load full order for response + socket emit
+    // 7) Reload full order for response + socket
     const fullOrder = await Order.findByPk(order.id, {
       include: [
         { model: User, attributes: ["id", "name", "email"] },
         { model: Vendor, attributes: ["id", "name", "cuisine"] },
-        {
-          model: OrderItem,
-          include: [{ model: MenuItem, attributes: ["id", "name", "price"] }],
-        },
+        { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
       ],
     });
 
-    // Emit live updates (helpers are set by app)
     const emitToVendor = req.emitToVendor || req.app.get("emitToVendor");
     const emitToUser = req.emitToUser || req.app.get("emitToUser");
-    if (typeof emitToVendor === "function") emitToVendor(Number(VendorId), "order:new", fullOrder);
+    if (typeof emitToVendor === "function") emitToVendor(vendorIdNum, "order:new", fullOrder);
     if (typeof emitToUser === "function") emitToUser(req.user.id, "order:new", fullOrder);
 
     return res.status(201).json({ message: "Order created", order: fullOrder });
   } catch (err) {
-    console.error("POST /api/orders error:", err); // <-- shows real cause in Render logs
+    // Give us a readable error and log details to Render logs
+    console.error("POST /api/orders error:", err?.name, err?.message, err?.stack);
+    if (err?.name === "SequelizeForeignKeyConstraintError") {
+      return res.status(400).json({
+        message: "Invalid foreign key (user/vendor/menu item mismatch). Check payload IDs.",
+        error: err.message,
+      });
+    }
+    if (err?.name === "SequelizeValidationError") {
+      return res.status(400).json({ message: "Validation failed", errors: err.errors });
+    }
     return res.status(500).json({ message: "Error creating order", error: err.message });
   }
 });
