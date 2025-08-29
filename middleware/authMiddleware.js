@@ -1,4 +1,5 @@
 
+// middleware/authMiddleware.js
 const jwt = require("jsonwebtoken");
 const { User } = require("../models");
 
@@ -15,7 +16,6 @@ const authenticateToken = async (req, res, next) => {
     const user = await User.findByPk(decoded.userId);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    // keep it small & predictable
     req.user = { id: user.id, role: user.role };
     next();
   } catch (err) {

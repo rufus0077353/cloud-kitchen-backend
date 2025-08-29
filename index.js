@@ -8,15 +8,12 @@ const http = require("http");
 const { Server } = require("socket.io");
 
 // ---- DB ----
-const db = require("./models");           // Sequelize models (includes sequelize instance)
-require("./db");                          // (ok if your connection is initialized here)
+const db = require("./models");          // Sequelize models (includes sequelize instance)
 
 // ---- Express app ----
 const app = express();
 
 // Allowed frontend origins (env first, fallback to known hosts)
-
-// --- before: your existing origins list ---
 const DEFAULT_ORIGINS = [
   "https://servezy.in",
   "https://glistening-taffy-7be8bf.netlify.app",
@@ -33,7 +30,7 @@ app.set("trust proxy", 1);
 // CORS for HTTP routes
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin) return cb(null, true);       // health checks / curl / same-origin
+    if (!origin) return cb(null, true); // health checks / curl / same-origin
     return FRONTENDS.includes(origin) ? cb(null, true) : cb(new Error("Not allowed by CORS"));
   },
   credentials: true,
@@ -51,12 +48,11 @@ const io = new Server(server, {
     methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
     credentials: true
   },
-  // These two reduce spurious disconnect banners on slow networks
-  pingInterval: 25000,  // default 25000; keep explicit
-  pingTimeout: 60000,   // give the client up to 60s to respond
+  pingInterval: 25000,
+  pingTimeout: 60000,
 });
 
-// expose helpers (unchanged if you already had them)
+// expose helpers
 const emitToVendor = (vendorId, event, payload) => {
   if (!vendorId) return;
   io.to(`vendor:${vendorId}`).emit(event, payload);

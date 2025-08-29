@@ -1,16 +1,17 @@
-
+// routes/adminRoutes.js
 const express = require("express");
 const router = express.Router();
+const bcrypt = require("bcrypt");
 const { User, Vendor, Order, MenuItem } = require("../models");
 const { authenticateToken, requireAdmin } = require("../middleware/authMiddleware");
 const { Op, Sequelize } = require("sequelize");
 
-// ✅ Admin Dashboard Overview
-router.get("/overview", authenticateToken, requireAdmin, async (req, res) => {
+// Overview
+router.get("/overview", authenticateToken, requireAdmin, async (_req, res) => {
   try {
-    const totalUsers = await User.count();
+    const totalUsers   = await User.count();
     const totalVendors = await Vendor.count();
-    const totalOrders = await Order.count();
+    const totalOrders  = await Order.count();
     const totalRevenue = await Order.sum("totalAmount");
     res.json({ totalUsers, totalVendors, totalOrders, totalRevenue });
   } catch (err) {
@@ -18,8 +19,8 @@ router.get("/overview", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// ✅ Admin Users CRUD
-router.get("/users", authenticateToken, requireAdmin, async (req, res) => {
+// Users
+router.get("/users", authenticateToken, requireAdmin, async (_req, res) => {
   try {
     const users = await User.findAll({ attributes: ["id", "name", "email", "role"] });
     res.json(users);
@@ -43,23 +44,18 @@ router.post("/users", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// Update a user by ID
 router.put("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { name, email, password, role } = req.body;
     const user = await User.findByPk(req.params.id);
-
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
+    if (!user) return res.status(404).json({ message: "User not found" });
 
     user.name = name || user.name;
     user.email = email || user.email;
     user.role = role || user.role;
 
     if (password) {
-      const hashedPassword = await bcrypt.hash(password, 10);
-      user.password = hashedPassword;
+      user.password = await bcrypt.hash(password, 10);
     }
 
     await user.save();
@@ -68,6 +64,7 @@ router.put("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
     res.status(500).json({ message: "Failed to update user", error: err.message });
   }
 });
+
 router.delete("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const user = await User.findByPk(req.params.id);
@@ -80,14 +77,11 @@ router.delete("/users/:id", authenticateToken, requireAdmin, async (req, res) =>
   }
 });
 
-// ✅ Promote User to Vendor
 // Promote user to vendor
 router.put("/promote/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const user = await User.findByPk(req.params.id);
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
+    if (!user) return res.status(404).json({ message: "User not found" });
 
     user.role = "vendor";
     await user.save();
@@ -98,8 +92,8 @@ router.put("/promote/:id", authenticateToken, requireAdmin, async (req, res) => 
   }
 });
 
-// ✅ Vendor CRUD
-router.get("/vendors", authenticateToken, requireAdmin, async (req, res) => {
+// Vendors
+router.get("/vendors", authenticateToken, requireAdmin, async (_req, res) => {
   try {
     const vendors = await Vendor.findAll();
     res.json(vendors);
@@ -148,11 +142,10 @@ router.delete("/vendors/:id", authenticateToken, requireAdmin, async (req, res) 
   }
 });
 
-// ✅ Order Filters & Insights
+// Orders (admin filters)
 router.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   const { UserId, VendorId, status, startDate, endDate } = req.query;
   const where = {};
-
   if (UserId) where.UserId = UserId;
   if (VendorId) where.VendorId = VendorId;
   if (status) where.status = status;
@@ -161,29 +154,23 @@ router.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
     if (startDate) where.createdAt[Op.gte] = new Date(startDate);
     if (endDate) where.createdAt[Op.lte] = new Date(endDate);
   }
-
   try {
     const orders = await Order.findAll({
       where,
       include: [
         { model: User, attributes: ["id", "name", "email"] },
         { model: Vendor, attributes: ["id", "name", "cuisine"] },
-        {
-          model: MenuItem,
-          attributes: ["id", "name", "price"],
-          through: { attributes: ["quantity"] },
-        }
+        { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
       ],
       order: [["createdAt", "DESC"]],
     });
-
     res.json(orders);
   } catch (err) {
     res.status(500).json({ message: "Orders fetch failed", error: err.message });
   }
 });
 
-router.get("/insights", authenticateToken, requireAdmin, async (req, res) => {
+router.get("/insights", authenticateToken, requireAdmin, async (_req, res) => {
   try {
     const recentOrders = await Order.findAll({
       attributes: [
@@ -201,11 +188,7 @@ router.get("/insights", authenticateToken, requireAdmin, async (req, res) => {
         "id", "name",
         [Sequelize.fn("SUM", Sequelize.col("OrderItem.quantity")), "totalSold"]
       ],
-      include: [{
-        model: Order,
-        attributes: [],
-        through: { attributes: ["quantity"] }
-      }],
+      include: [{ model: Order, attributes: [], through: { attributes: ["quantity"] } }],
       group: ["MenuItem.id"],
       order: [[Sequelize.literal("totalSold"), "DESC"]],
       limit: 5

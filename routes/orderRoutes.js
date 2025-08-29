@@ -1,3 +1,4 @@
+
 // routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
@@ -6,11 +7,7 @@ const { Order, OrderItem, Vendor, MenuItem, User } = require("../models");
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 
-// NOTE: Removed duplicate Vendor import and unused PushSubscription/sendPush imports
-
-/**
- * Helper to emit socket events (works whether helpers are on req or app)
- */
+// Socket emit helpers
 function emitToVendorHelper(req, vendorId, event, payload) {
   const fn = req.emitToVendor || req.app.get("emitToVendor");
   if (typeof fn === "function") fn(vendorId, event, payload);
@@ -20,21 +17,14 @@ function emitToUserHelper(req, userId, event, payload) {
   if (typeof fn === "function") fn(userId, event, payload);
 }
 
-/**
- * GET /api/orders/my
- * Orders for the logged-in user
- */
+/** GET /api/orders/my */
 router.get("/my", authenticateToken, async (req, res) => {
   try {
     const orders = await Order.findAll({
       where: { UserId: req.user.id },
       include: [
         { model: Vendor, attributes: ["id", "name", "cuisine"] },
-        {
-          model: MenuItem,
-          attributes: ["id", "name", "price"],
-          through: { attributes: ["quantity"] },
-        },
+        { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
       ],
       order: [["createdAt", "DESC"]],
     });
@@ -44,12 +34,8 @@ router.get("/my", authenticateToken, async (req, res) => {
   }
 });
 
-/**
- * GET /api/orders/vendor
- * Orders for the logged-in vendor (secure; derives VendorId from token)
- */
-router.get(
-  "/vendor",
+/** GET /api/orders/vendor (current vendor’s orders) */
+router.get("/vendor",
   authenticateToken,
   requireVendor,
   ensureVendorProfile,
@@ -60,11 +46,7 @@ router.get(
         where: { VendorId: vendorId },
         include: [
           { model: User, attributes: ["id", "name", "email"] },
-          {
-            // show line items via OrderItem → MenuItem
-            model: OrderItem,
-            include: [{ model: MenuItem, attributes: ["id", "name", "price"] }],
-          },
+          { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
         ],
         order: [["createdAt", "DESC"]],
       });
@@ -75,20 +57,14 @@ router.get(
   }
 );
 
-/**
- * (Optional) GET /api/orders/vendor/:vendorId
- */
+/** (Optional) GET /api/orders/vendor/:vendorId */
 router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
   try {
     const orders = await Order.findAll({
       where: { VendorId: req.params.vendorId },
       include: [
         { model: User, attributes: ["id", "name", "email"] },
-        {
-          model: MenuItem,
-          attributes: ["id", "name", "price"],
-          through: { attributes: ["quantity"] },
-        },
+        { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
       ],
       order: [["createdAt", "DESC"]],
     });
@@ -98,28 +74,18 @@ router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
   }
 });
 
-/**
- * POST /api/orders
- * Create a new order with associated order items
- * - Takes UserId from JWT (req.user.id)
- * - Recalculates total on the server from menu item prices
- * - Emits "order:new" to vendor and user rooms
- */
+/** POST /api/orders — create */
 router.post("/", authenticateToken, async (req, res) => {
   try {
-    const { VendorId, items } = req.body;
-
-    if (!VendorId || !Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ message: "VendorId and non-empty items are required" });
+    const { VendorId, items } = req.body || {};
+    if (typeof VendorId !== "number" || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ message: "Invalid payload: require numeric VendorId and non-empty items[]" });
     }
 
-    // Validate items
     const ids = [];
     for (const it of items) {
       if (!it || typeof it.MenuItemId !== "number" || typeof it.quantity !== "number" || it.quantity <= 0) {
-        return res.status(400).json({
-          message: "Each item must include a valid MenuItemId (number) and quantity (>0)",
-        });
+        return res.status(422).json({ message: "Each item must include MenuItemId:number and quantity:number>0" });
       }
       ids.push(it.MenuItemId);
     }
@@ -139,7 +105,6 @@ router.post("/", authenticateToken, async (req, res) => {
       0
     );
 
-    // Create order
     const order = await Order.create({
       UserId: req.user.id,
       VendorId,
@@ -147,40 +112,35 @@ router.post("/", authenticateToken, async (req, res) => {
       status: "pending",
     });
 
-    // Persist order items
-    const orderItems = items.map((item) => ({
+    await OrderItem.bulkCreate(items.map((it) => ({
       OrderId: order.id,
-      MenuItemId: item.MenuItemId,
-      quantity: item.quantity,
-    }));
-    await OrderItem.bulkCreate(orderItems);
+      MenuItemId: it.MenuItemId,
+      quantity: it.quantity,
+    })));
 
-    // Fetch full order for response + emit
     const fullOrder = await Order.findByPk(order.id, {
       include: [
         { model: User, attributes: ["id", "name", "email"] },
         { model: Vendor, attributes: ["id", "name", "cuisine"] },
-        {
-          model: OrderItem,
-          include: [{ model: MenuItem, attributes: ["id", "name", "price"] }],
-        },
+        { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
       ],
     });
 
-    // 🔔 Notify vendor and user in real-time
-    emitToVendorHelper(req, VendorId, "order:new", fullOrder);
-    emitToUserHelper(req, req.user.id, "order:new", fullOrder);
+    try {
+      emitToVendorHelper(req, VendorId, "order:new", fullOrder);
+      emitToUserHelper(req, req.user.id, "order:new", fullOrder);
+    } catch (e) {
+      console.warn("Socket emit failed (non-fatal):", e?.message);
+    }
 
     res.status(201).json({ message: "Order created", order: fullOrder });
   } catch (err) {
-    res.status(500).json({ message: "Error creating order", error: err.message });
+    console.error("POST /api/orders failed:", err);
+    res.status(500).json({ message: "Failed to create order" });
   }
 });
 
-/**
- * PUT /api/orders/:id
- * Update order totalAmount and order items
- */
+/** PUT /api/orders/:id — update */
 router.put("/:id", authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { totalAmount, items } = req.body;
@@ -194,26 +154,19 @@ router.put("/:id", authenticateToken, async (req, res) => {
 
     if (Array.isArray(items) && items.length) {
       await OrderItem.destroy({ where: { OrderId: id } });
-
-      const orderItems = items.map((item) => ({
+      await OrderItem.bulkCreate(items.map((it) => ({
         OrderId: id,
-        MenuItemId: item.MenuItemId,
-        quantity: item.quantity,
-      }));
-
-      await OrderItem.bulkCreate(orderItems);
+        MenuItemId: it.MenuItemId,
+        quantity: it.quantity,
+      })));
     }
-
     res.json({ message: "Order updated successfully", order });
   } catch (err) {
     res.status(500).json({ message: "Error updating order", error: err.message });
   }
 });
 
-/**
- * DELETE /api/orders/:id
- * Delete an order and associated order items
- */
+/** DELETE /api/orders/:id */
 router.delete("/:id", authenticateToken, async (req, res) => {
   try {
     const order = await Order.findByPk(req.params.id);
@@ -228,64 +181,46 @@ router.delete("/:id", authenticateToken, async (req, res) => {
   }
 });
 
-/**
- * GET /api/orders/filter
- * Filter orders by UserId, VendorId, status, and date range
- */
+/** GET /api/orders/filter */
 router.get("/filter", authenticateToken, async (req, res) => {
   const { UserId, VendorId, status, startDate, endDate } = req.query;
 
-  const whereClause = {};
-  if (UserId) whereClause.UserId = UserId;
-  if (VendorId) whereClause.VendorId = VendorId;
-  if (status) whereClause.status = status;
+  const where = {};
+  if (UserId) where.UserId = UserId;
+  if (VendorId) where.VendorId = VendorId;
+  if (status) where.status = status;
   if (startDate || endDate) {
-    whereClause.createdAt = {};
-    if (startDate) whereClause.createdAt[Op.gte] = new Date(startDate);
-    if (endDate) whereClause.createdAt[Op.lte] = new Date(endDate);
+    where.createdAt = {};
+    if (startDate) where.createdAt[Op.gte] = new Date(startDate);
+    if (endDate) where.createdAt[Op.lte] = new Date(endDate);
   }
 
   try {
     const orders = await Order.findAll({
-      where: whereClause,
+      where,
       include: [
         { model: User, attributes: ["id", "name", "email"] },
         { model: Vendor, attributes: ["id", "name", "cuisine"] },
-        {
-          model: MenuItem,
-          attributes: ["id", "name", "price"],
-          through: { attributes: ["quantity"] },
-        },
+        { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
       ],
       order: [["createdAt", "DESC"]],
     });
-
     res.json(orders);
   } catch (err) {
     res.status(500).json({ message: "Error filtering orders", error: err.message });
   }
 });
 
-/**
- * GET /api/orders/:id/invoice
- * Generate an HTML invoice for a specific order
- */
+/** GET /api/orders/:id/invoice */
 router.get("/:id/invoice", authenticateToken, async (req, res) => {
-  const { id } = req.params;
-
   try {
-    const order = await Order.findByPk(id, {
+    const order = await Order.findByPk(req.params.id, {
       include: [
         { model: User, attributes: ["name", "email"] },
         { model: Vendor, attributes: ["name", "cuisine"] },
-        {
-          model: MenuItem,
-          attributes: ["name", "price"],
-          through: { attributes: ["quantity"] },
-        },
+        { model: MenuItem, attributes: ["name", "price"], through: { attributes: ["quantity"] } },
       ],
     });
-
     if (!order) return res.status(404).json({ message: "Order not found" });
 
     const html = `
@@ -293,27 +228,19 @@ router.get("/:id/invoice", authenticateToken, async (req, res) => {
       <p><strong>User:</strong> ${order.User.name} (${order.User.email})</p>
       <p><strong>Vendor:</strong> ${order.Vendor.name} (${order.Vendor.cuisine})</p>
       <ul>
-        ${order.MenuItems
-          .map((item) => `<li>${item.name} (x${item.OrderItem.quantity}) - ₹${item.price}</li>`)
-          .join("")}
+        ${order.MenuItems.map(item => `<li>${item.name} (x${item.OrderItem.quantity}) - ₹${item.price}</li>`).join("")}
       </ul>
       <p><strong>Status:</strong> ${order.status}</p>
       <p><strong>Total Amount:</strong> ₹${order.totalAmount}</p>
     `;
-
     res.send(html);
   } catch (err) {
     res.status(500).json({ message: "Error generating invoice", error: err.message });
   }
 });
 
-/**
- * PATCH /api/orders/:id/status
- * Vendor updates order status (accepted/rejected/ready/delivered)
- * - Emits to both vendor and user rooms
- */
-router.patch(
-  "/:id/status",
+/** PATCH /api/orders/:id/status — vendor only */
+router.patch("/:id/status",
   authenticateToken,
   requireVendor,
   ensureVendorProfile,
@@ -330,14 +257,11 @@ router.patch(
 
       const order = await Order.findByPk(id);
       if (!order) return res.status(404).json({ message: "Order not found" });
-      if (order.VendorId !== vendorId) {
-        return res.status(403).json({ message: "Not your order" });
-      }
+      if (order.VendorId !== vendorId) return res.status(403).json({ message: "Not your order" });
 
       order.status = status;
       await order.save();
 
-      // 🔔 notify vendor and user
       emitToVendorHelper(req, order.VendorId, "order:status", { id: order.id, status: order.status });
       emitToUserHelper(req, order.UserId, "order:status", { id: order.id, status: order.status, UserId: order.UserId });
 

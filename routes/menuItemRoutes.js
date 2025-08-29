@@ -5,11 +5,9 @@ const router = express.Router();
 const { MenuItem } = require("../models");
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
-const { or } = require("sequelize");
 
 // GET all menu items for THIS vendor
-router.get(
-  "/mine",
+router.get("/mine",
   authenticateToken,
   requireVendor,
   ensureVendorProfile,
@@ -17,7 +15,7 @@ router.get(
     try {
       const items = await MenuItem.findAll({
         where: { VendorId: req.vendor.id },
-        order: [["createdAt", "DESC"]]
+        order: [["createdAt", "DESC"]],
       });
       res.json(items);
     } catch (err) {
@@ -26,23 +24,20 @@ router.get(
   }
 );
 
+// Public: GET menu items for a vendor (expects vendorId query)
 router.get("/", async (req, res) => {
   try {
     const { vendorId } = req.query;
-    if (!vendorId) {
-      // optional: return all or []
-      return res.json([]); // safest to avoid huge payloads/accidents
-    }
+    if (!vendorId) return res.json([]);
     const items = await MenuItem.findAll({ where: { VendorId: vendorId } });
-    res.json(items); // must be an array
+    res.json(items);
   } catch (err) {
     res.status(500).json({ message: "Failed to fetch menu items", error: err.message });
   }
 });
 
-// CREATE a new menu item (derive VendorId from ensured profile)
-router.post(
-  "/",
+// CREATE a new menu item (derive VendorId from vendor profile)
+router.post("/",
   authenticateToken,
   requireVendor,
   ensureVendorProfile,
@@ -70,8 +65,7 @@ router.post(
 );
 
 // UPDATE a menu item (ownership check)
-router.put(
-  "/:id",
+router.put("/:id",
   authenticateToken,
   requireVendor,
   ensureVendorProfile,
@@ -79,15 +73,14 @@ router.put(
     try {
       const item = await MenuItem.findByPk(req.params.id);
       if (!item) return res.status(404).json({ message: "Menu item not found" });
-      if (item.VendorId !== req.vendor.id)
-        return res.status(403).json({ message: "Not your menu item" });
+      if (item.VendorId !== req.vendor.id) return res.status(403).json({ message: "Not your menu item" });
 
       const { name, price, description, isAvailable } = req.body || {};
-      const proceNum = price !== undefined ? Number(price) : undefined;
+      const priceNum = price !== undefined ? Number(price) : undefined;
 
       await item.update({
-        name: name ?? item.name,
-        price: proceNum === undefined || Number.isNaN(proceNum) ? item.price : proceNum,
+        name:        name ?? item.name,
+        price:       priceNum === undefined || Number.isNaN(priceNum) ? item.price : priceNum,
         description: description ?? item.description,
         isAvailable: typeof isAvailable === "boolean" ? isAvailable : item.isAvailable,
       });
@@ -100,8 +93,7 @@ router.put(
 );
 
 // DELETE a menu item (ownership check)
-router.delete(
-  "/:id",
+router.delete("/:id",
   authenticateToken,
   requireVendor,
   ensureVendorProfile,
@@ -109,8 +101,7 @@ router.delete(
     try {
       const item = await MenuItem.findByPk(req.params.id);
       if (!item) return res.status(404).json({ message: "Menu item not found" });
-      if (item.VendorId !== req.vendor.id)
-        return res.status(403).json({ message: "Not your menu item" });
+      if (item.VendorId !== req.vendor.id) return res.status(403).json({ message: "Not your menu item" });
 
       await item.destroy();
       res.json({ message: "Menu item deleted" });
