@@ -74,6 +74,101 @@ router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
   }
 });
 
+/** GET /api/orders/vendor/summary (current vendor only) */
+router.get(
+  "/vendor/summary",
+  authenticateToken,
+  requireVendor,
+  ensureVendorProfile,
+  async (req, res) => {
+    try {
+      const vendorId = req.vendor.id;
+
+      // ---- helpers for periods (server timezone) ----
+      const startOfToday = () => {
+        const d = new Date();
+        d.setHours(0, 0, 0, 0);
+        return d;
+      };
+      const startOfWeek = () => {
+        const d = new Date();
+        const day = d.getDay();            // Sun=0..Sat=6
+        const diff = (day + 6) % 7;        // make Monday = start (Mon=0)
+        d.setHours(0, 0, 0, 0);
+        d.setDate(d.getDate() - diff);
+        return d;
+      };
+      const startOfMonth = () => {
+        const d = new Date();
+        d.setHours(0, 0, 0, 0);
+        d.setDate(1);
+        return d;
+      };
+
+      const nonRejectedWhere = { VendorId: vendorId, status: { [Op.ne]: "rejected" } };
+
+      // ---- lifetime ----
+      const [totalOrders, lifetimeRevenue] = await Promise.all([
+        Order.count({ where: { VendorId: vendorId } }),
+        Order.sum("totalAmount", { where: nonRejectedWhere }),
+      ]);
+
+      // ---- by status counts ----
+      const ST = ["pending", "accepted", "ready", "delivered", "rejected"];
+      const statusCountsArr = await Promise.all(
+        ST.map((s) =>
+          Order.count({ where: { VendorId: vendorId, status: s } })
+        )
+      );
+      const byStatus = Object.fromEntries(ST.map((s, i) => [s, statusCountsArr[i] || 0]));
+
+      // ---- today / week / month ----
+      const todayStart = startOfToday();
+      const weekStart  = startOfWeek();
+      const monthStart = startOfMonth();
+
+      const [ordersToday, revenueToday] = await Promise.all([
+        Order.count({ where: { VendorId: vendorId, createdAt: { [Op.gte]: todayStart } } }),
+        Order.sum("totalAmount", { where: { ...nonRejectedWhere, createdAt: { [Op.gte]: todayStart } } }),
+      ]);
+
+      const [ordersWeek, revenueWeek] = await Promise.all([
+        Order.count({ where: { VendorId: vendorId, createdAt: { [Op.gte]: weekStart } } }),
+        Order.sum("totalAmount", { where: { ...nonRejectedWhere, createdAt: { [Op.gte]: weekStart } } }),
+      ]);
+
+      const [ordersMonth, revenueMonth] = await Promise.all([
+        Order.count({ where: { VendorId: vendorId, createdAt: { [Op.gte]: monthStart } } }),
+        Order.sum("totalAmount", { where: { ...nonRejectedWhere, createdAt: { [Op.gte]: monthStart } } }),
+      ]);
+
+      res.json({
+        vendorId,
+        totals: {
+          orders: totalOrders || 0,
+          revenue: Number(lifetimeRevenue || 0),
+        },
+        today: {
+          orders: ordersToday || 0,
+          revenue: Number(revenueToday || 0),
+        },
+        week: {
+          orders: ordersWeek || 0,
+          revenue: Number(revenueWeek || 0),
+        },
+        month: {
+          orders: ordersMonth || 0,
+          revenue: Number(revenueMonth || 0),
+        },
+        byStatus,
+      });
+    } catch (err) {
+      console.error("GET /api/orders/vendor/summary error:", err?.message);
+      res.status(500).json({ message: "Failed to build summary", error: err.message });
+    }
+  }
+);
+
 // POST /api/orders — user must be logged in
 router.post("/", authenticateToken, async (req, res) => {
   try {
