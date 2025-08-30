@@ -126,6 +126,62 @@ router.get(
   }
 );
 
+
+// GET /api/orders/vendor/daily?days=14  — last N days daily orders & revenue for current vendor
+router.get(
+  "/vendor/daily",
+  authenticateToken,
+  requireVendor,
+  ensureVendorProfile,
+  async (req, res) => {
+    try {
+      const vendorId = req.vendor.id;
+      const days = Math.max(1, Math.min(90, Number(req.query.days) || 14));
+
+      // start date (00:00 local time)
+      const start = new Date();
+      start.setHours(0, 0, 0, 0);
+      start.setDate(start.getDate() - (days - 1));
+
+      // Raw SQL tailored for Postgres (fast & clean)
+      const sequelize = Order.sequelize;
+      const [rows] = await sequelize.query(
+        `
+        SELECT
+          to_char(date_trunc('day', "createdAt"), 'YYYY-MM-DD') AS date,
+          COUNT(*) FILTER (WHERE status <> 'rejected')                  AS orders,
+          COALESCE(SUM(CASE WHEN status <> 'rejected' THEN "totalAmount" END), 0) AS revenue
+        FROM "orders"
+        WHERE "VendorId" = :vendorId
+          AND "createdAt" >= :startDate
+        GROUP BY 1
+        ORDER BY 1 ASC
+        `,
+        { replacements: { vendorId, startDate: start } }
+      );
+
+      // Fill missing days with zeros so the chart is continuous
+      const map = new Map(rows.map(r => [r.date, r]));
+      const out = [];
+      const d = new Date(start);
+      for (let i = 0; i < days; i++) {
+        const key = d.toISOString().slice(0, 10);
+        out.push({
+          date: key,
+          orders: Number(map.get(key)?.orders || 0),
+          revenue: Number(map.get(key)?.revenue || 0),
+        });
+        d.setDate(d.getDate() + 1);
+      }
+
+      res.json(out);
+    } catch (err) {
+      console.error("GET /api/orders/vendor/daily error:", err);
+      res.status(500).json({ message: "Failed to build daily trend", error: err.message });
+    }
+  }
+);
+
 // ----------------- vendor (any) orders by id -----------------
 router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
   try {
