@@ -13,9 +13,30 @@ router.get(
   requireVendor,
   ensureVendorProfile,
   (req, res) => {
-    res.json({ vendorId: req.vendor.id, userId: req.user.id });
+    res.json({ vendorId: req.vendor.id, userId: req.user.id, isOpen: req.vendor.IsOpen });
   }
 );
+
+// toggle open/closed
+router.patch(
+  "/me/status",
+  authenticateToken,
+  requireVendor,
+  ensureVendorProfile,
+  async (req, res) => { 
+    try {
+      const { isOpen } = req.body;
+      if (typeof isOpen !== "boolean") {
+        return res.status(400).json({ message: "isOpen boolean required" });
+      }
+      req.vendor.isOpen = isOpen;
+      await req.vendor.save();
+      res.json({ message: "Vendor status updated", isOpen: req.vendor.isOpen });
+    } catch (err) {
+      res.status(500).json({ message: "Error updating status", error: err.message });
+    }
+  }
+);   
 
 // All vendors
 router.get("/", async (_req, res) => {
