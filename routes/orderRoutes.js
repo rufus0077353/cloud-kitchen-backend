@@ -1,3 +1,4 @@
+
 const express = require("express");
 const router = express.Router();
 const { Op } = require("sequelize");
@@ -126,7 +127,6 @@ router.get(
   }
 );
 
-
 // GET /api/orders/vendor/daily?days=14  — last N days daily orders & revenue for current vendor
 router.get(
   "/vendor/daily",
@@ -149,8 +149,8 @@ router.get(
         `
         SELECT
           to_char(date_trunc('day', "createdAt"), 'YYYY-MM-DD') AS date,
-          COUNT(*) FILTER (WHERE status <> 'rejected')                  AS orders,
-          COALESCE(SUM(CASE WHEN status <> 'rejected' THEN "totalAmount" END), 0) AS revenue
+          COUNT(*) FILTER (WHERE status <> 'rejected')                                   AS orders,
+          COALESCE(SUM(CASE WHEN status <> 'rejected' THEN "totalAmount" END), 0)        AS revenue
         FROM "orders"
         WHERE "VendorId" = :vendorId
           AND "createdAt" >= :startDate
@@ -205,7 +205,7 @@ router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
 // ----------------- create order (user) -----------------
 router.post("/", authenticateToken, async (req, res) => {
   try {
-    const { VendorId, items } = req.body;
+    const { VendorId, items, paymentMethod } = req.body;
 
     const vendorIdNum = Number(VendorId);
     if (!Number.isFinite(vendorIdNum)) {
@@ -253,11 +253,15 @@ router.post("/", authenticateToken, async (req, res) => {
       0
     );
 
+    const method = paymentMethod || "cod";
+
     const order = await Order.create({
       UserId: req.user.id,
       VendorId: vendorIdNum,
       totalAmount: computedTotal,
       status: "pending",
+      paymentMethod: method,
+      paymentStatus: "unpaid", // start unpaid; user can mock-pay
     });
 
     await OrderItem.bulkCreate(
@@ -292,6 +296,81 @@ router.post("/", authenticateToken, async (req, res) => {
       return res.status(400).json({ message: "Validation failed", errors: err.errors });
     }
     return res.status(500).json({ message: "Error creating order", error: err.message });
+  }
+});
+
+// ----------------- mock payments (on this router) -----------------
+
+// POST /api/orders/mock-payment/start  { orderId }
+router.post("/mock-payment/start", authenticateToken, async (req, res) => {
+  try {
+    const { orderId } = req.body || {};
+    const order = await Order.findByPk(orderId);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+    if (order.UserId !== req.user.id) return res.status(403).json({ message: "Not your order" });
+    if (order.paymentStatus === "paid") return res.status(400).json({ message: "Order already paid" });
+
+    if (!["mock_online", "cod"].includes(order.paymentMethod)) {
+      return res.status(400).json({ message: `Cannot mock-start payment for method: ${order.paymentMethod}` });
+    }
+
+    order.paymentStatus = "processing";
+    await order.save();
+
+    emitToUserHelper(req, order.UserId, "payment:processing", { id: order.id });
+    emitToVendorHelper(req, order.VendorId, "payment:processing", { id: order.id });
+
+    res.json({ message: "Mock payment started", orderId: order.id, status: order.paymentStatus });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to start mock payment", error: err.message });
+  }
+});
+
+// POST /api/orders/mock-payment/succeed  { orderId }
+router.post("/mock-payment/succeed", authenticateToken, async (req, res) => {
+  try {
+    const { orderId } = req.body || {};
+    const order = await Order.findByPk(orderId, {
+      include: [
+        { model: User, attributes: ["id", "name", "email"] },
+        { model: Vendor, attributes: ["id", "name", "cuisine"] },
+        { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
+      ],
+    });
+    if (!order) return res.status(404).json({ message: "Order not found" });
+    if (order.UserId !== req.user.id) return res.status(403).json({ message: "Not your order" });
+    if (order.paymentStatus === "paid") return res.status(400).json({ message: "Order already paid" });
+
+    order.paymentStatus = "paid";
+    await order.save();
+
+    emitToUserHelper(req, order.UserId, "payment:success", { id: order.id });
+    emitToVendorHelper(req, order.VendorId, "payment:success", { id: order.id });
+
+    res.json({ message: "Mock payment succeeded", order });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to complete mock payment", error: err.message });
+  }
+});
+
+// POST /api/orders/mock-payment/fail  { orderId }
+router.post("/mock-payment/fail", authenticateToken, async (req, res) => {
+  try {
+    const { orderId } = req.body || {};
+    const order = await Order.findByPk(orderId);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+    if (order.UserId !== req.user.id) return res.status(403).json({ message: "Not your order" });
+    if (order.paymentStatus === "paid") return res.status(400).json({ message: "Order already paid" });
+
+    order.paymentStatus = "failed";
+    await order.save();
+
+    emitToUserHelper(req, order.UserId, "payment:failed", { id: order.id });
+    emitToVendorHelper(req, order.VendorId, "payment:failed", { id: order.id });
+
+    res.json({ message: "Mock payment failed", orderId: order.id, status: order.paymentStatus });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fail mock payment", error: err.message });
   }
 });
 
@@ -379,6 +458,7 @@ router.get("/:id/invoice", authenticateToken, async (req, res) => {
       <h2>Invoice for Order #${order.id}</h2>
       <p><strong>User:</strong> ${order.User.name} (${order.User.email})</p>
       <p><strong>Vendor:</strong> ${order.Vendor.name} (${order.Vendor.cuisine})</p>
+      <p><strong>Payment:</strong> ${order.paymentMethod || "-"} — <em>${order.paymentStatus || "-"}</em></p>
       <ul>
         ${order.MenuItems.map(item => `<li>${item.name} (x${item.OrderItem.quantity}) - ₹${item.price}</li>`).join("")}
       </ul>

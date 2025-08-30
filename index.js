@@ -76,6 +76,7 @@ const orderRoutes = require("./routes/orderRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 const pushRoutes = require("./routes/pushRoutes");
 const { VAPID_PUBLIC_KEY } = require("./utils/push");
+const paymentRoutes = require("./routes/paymentRoutes");
 
 app.use("/api/auth", authRoutes);
 app.use("/api/vendors", vendorRoutes);
@@ -87,6 +88,12 @@ app.use("/api/orders", (req, _res, next) => {
   req.emitToUser = emitToUser;
   next();
 }, orderRoutes);
+
+app.use("/api/payments", (req, _res, next) => {
+  req.emitToVendor = emitToVendor;
+  req.emitToUser = emitToUser;
+  next();
+}, paymentRoutes);
 
 app.use("/api/push", pushRoutes);
 app.get("/public-key", (_req, res) => res.json({ publicKey: VAPID_PUBLIC_KEY || "" }));
