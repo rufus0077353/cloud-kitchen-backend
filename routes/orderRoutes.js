@@ -1,4 +1,3 @@
-
 const express = require("express");
 const router = express.Router();
 const { Op } = require("sequelize");
@@ -6,7 +5,7 @@ const { Order, OrderItem, Vendor, MenuItem, User } = require("../models");
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 
-// Socket emit helpers
+// ----------------- socket helpers -----------------
 function emitToVendorHelper(req, vendorId, event, payload) {
   const fn = req.emitToVendor || req.app.get("emitToVendor");
   if (typeof fn === "function") fn(vendorId, event, payload);
@@ -16,7 +15,7 @@ function emitToUserHelper(req, userId, event, payload) {
   if (typeof fn === "function") fn(userId, event, payload);
 }
 
-/** GET /api/orders/my */
+// ----------------- user orders -----------------
 router.get("/my", authenticateToken, async (req, res) => {
   try {
     const orders = await Order.findAll({
@@ -33,7 +32,7 @@ router.get("/my", authenticateToken, async (req, res) => {
   }
 });
 
-/** GET /api/orders/vendor (current vendor’s orders) */
+// ----------------- vendor (current) orders -----------------
 router.get(
   "/vendor",
   authenticateToken,
@@ -57,24 +56,7 @@ router.get(
   }
 );
 
-/** (Optional) GET /api/orders/vendor/:vendorId */
-router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
-  try {
-    const orders = await Order.findAll({
-      where: { VendorId: req.params.vendorId },
-      include: [
-        { model: User, attributes: ["id", "name", "email"] },
-        { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
-      ],
-      order: [["createdAt", "DESC"]],
-    });
-    res.json(orders);
-  } catch (err) {
-    res.status(500).json({ message: "Error fetching vendor orders", error: err.message });
-  }
-});
-
-/** GET /api/orders/vendor/summary (current vendor only) */
+// ----------------- vendor summary (place BEFORE /vendor/:vendorId !) -----------------
 router.get(
   "/vendor/summary",
   authenticateToken,
@@ -82,47 +64,34 @@ router.get(
   ensureVendorProfile,
   async (req, res) => {
     try {
+      if (!req.vendor || !req.vendor.id) {
+        return res.status(400).json({ message: "Vendor profile not found for this user" });
+      }
       const vendorId = req.vendor.id;
 
-      // ---- helpers for periods (server timezone) ----
-      const startOfToday = () => {
-        const d = new Date();
-        d.setHours(0, 0, 0, 0);
-        return d;
-      };
-      const startOfWeek = () => {
-        const d = new Date();
-        const day = d.getDay();            // Sun=0..Sat=6
-        const diff = (day + 6) % 7;        // make Monday = start (Mon=0)
-        d.setHours(0, 0, 0, 0);
-        d.setDate(d.getDate() - diff);
-        return d;
-      };
-      const startOfMonth = () => {
-        const d = new Date();
-        d.setHours(0, 0, 0, 0);
-        d.setDate(1);
-        return d;
-      };
+      // date helpers (server TZ)
+      const startOfToday = () => { const d = new Date(); d.setHours(0,0,0,0); return d; };
+      const startOfWeek  = () => { const d = new Date(); const diff = (d.getDay()+6)%7; d.setHours(0,0,0,0); d.setDate(d.getDate()-diff); return d; };
+      const startOfMonth = () => { const d = new Date(); d.setHours(0,0,0,0); d.setDate(1); return d; };
 
       const nonRejectedWhere = { VendorId: vendorId, status: { [Op.ne]: "rejected" } };
 
-      // ---- lifetime ----
+      // lifetime
       const [totalOrders, lifetimeRevenue] = await Promise.all([
         Order.count({ where: { VendorId: vendorId } }),
         Order.sum("totalAmount", { where: nonRejectedWhere }),
       ]);
 
-      // ---- by status counts ----
+      // counts by status
       const ST = ["pending", "accepted", "ready", "delivered", "rejected"];
-      const statusCountsArr = await Promise.all(
-        ST.map((s) =>
-          Order.count({ where: { VendorId: vendorId, status: s } })
-        )
+      const statusCounts = {};
+      await Promise.all(
+        ST.map(async (s) => {
+          statusCounts[s] = await Order.count({ where: { VendorId: vendorId, status: s } });
+        })
       );
-      const byStatus = Object.fromEntries(ST.map((s, i) => [s, statusCountsArr[i] || 0]));
 
-      // ---- today / week / month ----
+      // periods
       const todayStart = startOfToday();
       const weekStart  = startOfWeek();
       const monthStart = startOfMonth();
@@ -144,37 +113,44 @@ router.get(
 
       res.json({
         vendorId,
-        totals: {
-          orders: totalOrders || 0,
-          revenue: Number(lifetimeRevenue || 0),
-        },
-        today: {
-          orders: ordersToday || 0,
-          revenue: Number(revenueToday || 0),
-        },
-        week: {
-          orders: ordersWeek || 0,
-          revenue: Number(revenueWeek || 0),
-        },
-        month: {
-          orders: ordersMonth || 0,
-          revenue: Number(revenueMonth || 0),
-        },
-        byStatus,
+        totals:   { orders: totalOrders || 0, revenue: Number(lifetimeRevenue || 0) },
+        today:    { orders: ordersToday || 0, revenue: Number(revenueToday || 0) },
+        week:     { orders: ordersWeek || 0, revenue: Number(revenueWeek || 0) },
+        month:    { orders: ordersMonth || 0, revenue: Number(revenueMonth || 0) },
+        byStatus: statusCounts,
       });
     } catch (err) {
-      console.error("GET /api/orders/vendor/summary error:", err?.message);
+      console.error("GET /api/orders/vendor/summary error:", err);
       res.status(500).json({ message: "Failed to build summary", error: err.message });
     }
   }
 );
 
-// POST /api/orders — user must be logged in
+// ----------------- vendor (any) orders by id -----------------
+router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
+  try {
+    const idNum = Number(req.params.vendorId);
+    if (!Number.isFinite(idNum)) return res.status(400).json({ message: "Invalid vendor id" });
+
+    const orders = await Order.findAll({
+      where: { VendorId: idNum },
+      include: [
+        { model: User, attributes: ["id", "name", "email"] },
+        { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
+      ],
+      order: [["createdAt", "DESC"]],
+    });
+    res.json(orders);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching vendor orders", error: err.message });
+  }
+});
+
+// ----------------- create order (user) -----------------
 router.post("/", authenticateToken, async (req, res) => {
   try {
     const { VendorId, items } = req.body;
 
-    // 1) Validate basic shape
     const vendorIdNum = Number(VendorId);
     if (!Number.isFinite(vendorIdNum)) {
       return res.status(400).json({ message: "VendorId must be a number", got: VendorId });
@@ -183,7 +159,6 @@ router.post("/", authenticateToken, async (req, res) => {
       return res.status(400).json({ message: "At least one item is required" });
     }
 
-    // 2) Validate items shape + coerce
     const ids = [];
     const cleanItems = [];
     for (const it of items) {
@@ -199,15 +174,14 @@ router.post("/", authenticateToken, async (req, res) => {
       cleanItems.push({ MenuItemId: mid, quantity: qty });
     }
 
-    // 3) Ensure all items belong to the selected vendor
     const menuRows = await MenuItem.findAll({
       where: { id: ids, VendorId: vendorIdNum },
       attributes: ["id", "price", "name", "VendorId"],
     });
 
-    const foundIds = menuRows.map(m => Number(m.id));
+    const foundIds = menuRows.map((m) => Number(m.id));
     if (menuRows.length !== ids.length) {
-      const missing = ids.filter(id => !foundIds.includes(id));
+      const missing = ids.filter((id) => !foundIds.includes(id));
       return res.status(400).json({
         message: "One or more items are invalid for this vendor (check menu item -> vendor mapping).",
         vendorId: vendorIdNum,
@@ -217,14 +191,12 @@ router.post("/", authenticateToken, async (req, res) => {
       });
     }
 
-    // 4) Compute total server-side
-    const priceMap = new Map(menuRows.map(m => [Number(m.id), Number(m.price) || 0]));
+    const priceMap = new Map(menuRows.map((m) => [Number(m.id), Number(m.price) || 0]));
     const computedTotal = cleanItems.reduce(
       (sum, it) => sum + (priceMap.get(it.MenuItemId) || 0) * it.quantity,
       0
     );
 
-    // 5) Create order
     const order = await Order.create({
       UserId: req.user.id,
       VendorId: vendorIdNum,
@@ -232,16 +204,14 @@ router.post("/", authenticateToken, async (req, res) => {
       status: "pending",
     });
 
-    // 6) Create line items
     await OrderItem.bulkCreate(
-      cleanItems.map(it => ({
+      cleanItems.map((it) => ({
         OrderId: order.id,
         MenuItemId: it.MenuItemId,
         quantity: it.quantity,
       }))
     );
 
-    // 7) Reload full order for response + socket
     const fullOrder = await Order.findByPk(order.id, {
       include: [
         { model: User, attributes: ["id", "name", "email"] },
@@ -269,7 +239,7 @@ router.post("/", authenticateToken, async (req, res) => {
   }
 });
 
-/** PUT /api/orders/:id — update */
+// ----------------- update/delete/filter/invoice -----------------
 router.put("/:id", authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { totalAmount, items } = req.body;
@@ -295,7 +265,6 @@ router.put("/:id", authenticateToken, async (req, res) => {
   }
 });
 
-/** DELETE /api/orders/:id */
 router.delete("/:id", authenticateToken, async (req, res) => {
   try {
     const order = await Order.findByPk(req.params.id);
@@ -310,7 +279,6 @@ router.delete("/:id", authenticateToken, async (req, res) => {
   }
 });
 
-/** GET /api/orders/filter */
 router.get("/filter", authenticateToken, async (req, res) => {
   const { UserId, VendorId, status, startDate, endDate } = req.query;
 
@@ -340,7 +308,6 @@ router.get("/filter", authenticateToken, async (req, res) => {
   }
 });
 
-/** GET /api/orders/:id/invoice */
 router.get("/:id/invoice", authenticateToken, async (req, res) => {
   try {
     const order = await Order.findByPk(req.params.id, {
@@ -368,7 +335,7 @@ router.get("/:id/invoice", authenticateToken, async (req, res) => {
   }
 });
 
-/** PATCH /api/orders/:id/status — vendor only */
+// ----------------- vendor updates status -----------------
 router.patch(
   "/:id/status",
   authenticateToken,
