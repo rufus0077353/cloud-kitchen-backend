@@ -424,57 +424,184 @@ router.get("/:id/invoice", authenticateToken, async (req, res) => {
     });
     if (!order) return res.status(404).json({ message: "Order not found" });
 
-    const itemsHtml = order.MenuItems.map(
-      item => `<li>${item.name} (x${item.OrderItem.quantity}) - ₹${item.price}</li>`
-    ).join("");
+    // ---- helpers ----
+    const escapeHtml = (s = "") =>
+      String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
 
-    const html = `
-      <!doctype html>
-      <html>
-        <head>
-          <meta charset="utf-8"/>
-          <title>Invoice #${order.id}</title>
-          <style>
-            body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:24px;color:#111}
-            h1,h2,h3{margin:0 0 8px}
-            .muted{color:#666}
-            .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-            ul{margin:8px 0 16px}
-            .total{font-size:18px;font-weight:700}
-            .badge{display:inline-block;padding:2px 8px;border-radius:8px;background:#eee;margin-left:8px}
-            .btn{padding:8px 12px;border:1px solid #999;border-radius:6px;background:#f7f7f7;text-decoration:none;color:#111}
-            .actions{margin-top:16px}
-          </style>
-        </head>
-        <body>
-          <h2>Invoice for Order #${order.id}</h2>
-          <div class="grid">
-            <div>
-              <div><b>User:</b> ${order.User.name} <span class="muted">(${order.User.email})</span></div>
-              <div><b>Vendor:</b> ${order.Vendor.name} <span class="muted">(${order.Vendor.cuisine || "—"})</span></div>
-            </div>
-            <div style="text-align:right">
-              <div><b>Status:</b> ${order.status}</div>
-              <div><b>Payment:</b> ${(order.paymentMethod === "mock_online" ? "Online" : "COD")} · ${order.paymentStatus || "unpaid"}</div>
-              ${order.paidAt ? `<div><b>Paid at:</b> ${new Date(order.paidAt).toLocaleString()}</div>` : ""}
-            </div>
-          </div>
-          <h3>Items</h3>
-          <ul>${itemsHtml}</ul>
-          <div class="total">Total Amount: ₹${order.totalAmount}</div>
-          <div class="actions">
-            <a href="javascript:window.print()" class="btn">Print / Save as PDF</a>
-          </div>
-        </body>
-      </html>
-    `;
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(html);
+    const fmtINR = (n) => `₹${Number(n || 0).toFixed(2)}`;
+
+    const items = Array.isArray(order.MenuItems) ? order.MenuItems : [];
+    const rowsHtml = items
+      .map((item) => {
+        const qty = Number(item?.OrderItem?.quantity || 1);
+        const price = Number(item?.price || 0);
+        const lineTotal = price * qty;
+        return `
+          <tr>
+            <td>${escapeHtml(item.name)}</td>
+            <td class="right">${qty}</td>
+            <td class="right">${fmtINR(price)}</td>
+            <td class="right">${fmtINR(lineTotal)}</td>
+          </tr>`;
+      })
+      .join("");
+
+    const computedSubTotal = items.reduce(
+      (sum, item) => sum + Number(item?.price || 0) * Number(item?.OrderItem?.quantity || 1),
+      0
+    );
+
+    // Optional: show a logo if you set INVOICE_LOGO_URL in env
+    const LOGO = process.env.INVOICE_LOGO_URL || "";
+
+    const paymentMethod =
+      order.paymentMethod === "mock_online" ? "Online (Mock)" : (order.paymentMethod || "COD");
+    const paymentStatus = order.paymentStatus || "unpaid";
+    const paidAt = order.paidAt ? new Date(order.paidAt).toLocaleString("en-IN") : "";
+
+    const createdAt = order.createdAt ? new Date(order.createdAt).toLocaleString("en-IN") : "-";
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Invoice #${order.id}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root{
+    --ink:#111; --muted:#6b7280; --line:#e5e7eb; --brand:#111827;
+  }
+  *{ box-sizing: border-box; }
+  body{
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+    color: var(--ink);
+    margin: 0; padding: 24px;
+    background: #fff;
+  }
+  .wrap{ max-width: 860px; margin: 0 auto; }
+  header{
+    display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px;
+  }
+  .brand{ display:flex; align-items:center; gap:12px; }
+  .brand img{ max-height: 48px; width: auto; }
+  h1{ margin:0; font-size: 20px; }
+  .muted{ color: var(--muted); }
+  .grid{
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0 24px;
+  }
+  .card{
+    border: 1px solid var(--line); border-radius: 10px; padding: 14px;
+  }
+  table{ width: 100%; border-collapse: collapse; }
+  thead th{
+    text-align: left; font-size: 12px; color: var(--muted);
+    border-bottom: 1px solid var(--line); padding: 10px 8px;
+  }
+  tbody td{ padding: 10px 8px; border-bottom: 1px solid var(--line); }
+  .right{ text-align: right; }
+  .totals{
+    display: grid; grid-template-columns: 1fr 280px; gap: 16px; margin-top: 12px; align-items: start;
+  }
+  .totals .box{
+    border: 1px solid var(--line); border-radius: 10px; padding: 12px;
+  }
+  .totals .row{ display:flex; justify-content: space-between; margin: 6px 0; }
+  .grand{ font-weight: 700; font-size: 16px; }
+  .badge{
+    display:inline-block; padding: 3px 8px; border-radius: 999px; font-size: 12px; border:1px solid var(--line);
+  }
+  .paid{ background:#ecfdf5; border-color:#a7f3d0; }
+  .unpaid{ background:#f9fafb; }
+  .failed{ background:#fef2f2; border-color:#fecaca; }
+  .actions{ margin: 18px 0 8px; }
+  .btn{
+    background:#111827; color:#fff; border:0; padding:10px 14px; border-radius:8px; cursor:pointer;
+  }
+  @media print {
+    .no-print, .actions { display: none !important; }
+    body{ padding: 0; }
+    @page { size: A4; margin: 14mm; }
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        ${LOGO ? `<img src="${escapeHtml(LOGO)}" alt="Logo" />` : ""}
+        <div>
+          <h1>Tax Invoice</h1>
+          <div class="muted">Order #${order.id}</div>
+        </div>
+      </div>
+      <div style="text-align:right">
+        <div><strong>${escapeHtml(order.Vendor?.name || "Vendor")}</strong></div>
+        <div class="muted">${escapeHtml(order.Vendor?.cuisine || "")}</div>
+        <div class="muted">Created: ${createdAt}</div>
+      </div>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <div style="font-weight:600; margin-bottom:6px;">Billed To</div>
+        <div>${escapeHtml(order.User?.name || "Customer")}</div>
+        <div class="muted">${escapeHtml(order.User?.email || "")}</div>
+      </div>
+      <div class="card">
+        <div style="font-weight:600; margin-bottom:6px;">Payment</div>
+        <div>Method: ${escapeHtml(paymentMethod)}</div>
+        <div>Status:
+          <span class="badge ${paymentStatus === "paid" ? "paid" : (paymentStatus === "failed" ? "failed" : "unpaid")}">
+            ${escapeHtml(paymentStatus)}
+          </span>
+        </div>
+        ${paidAt ? `<div class="muted">Paid at: ${paidAt}</div>` : ""}
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Item</th>
+          <th class="right">Qty</th>
+          <th class="right">Price</th>
+          <th class="right">Line Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rowsHtml || `<tr><td class="muted" colspan="4" style="text-align:center">No line items</td></tr>`}
+      </tbody>
+    </table>
+
+    <div class="totals">
+      <div class="actions no-print">
+        <button class="btn" onclick="window.print()">Print / Save PDF</button>
+      </div>
+      <div class="box">
+        <div class="row"><span>Items total</span><span>${fmtINR(computedSubTotal)}</span></div>
+        <div class="row grand"><span>Order total</span><span>${fmtINR(order.totalAmount)}</span></div>
+        <div class="row"><span>Order status</span><span>${escapeHtml(order.status)}</span></div>
+      </div>
+    </div>
+
+    <p class="muted" style="margin-top:16px; font-size:12px">
+      This is a computer-generated invoice. For support, contact the vendor directly.
+    </p>
+  </div>
+</body>
+</html>`;
+
+    res.set("Content-Type", "text/html; charset=utf-8");
+    return res.send(html);
   } catch (err) {
-    res.status(500).json({ message: "Error generating invoice", error: err.message });
+    return res.status(500).json({ message: "Error generating invoice", error: err.message });
   }
 });
-
 // ----------------- vendor updates status -----------------
 router.patch(
   "/:id/status",
