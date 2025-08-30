@@ -4,6 +4,7 @@ module.exports = (sequelize, DataTypes) => {
     cuisine:  { type: DataTypes.STRING },
     location: { type: DataTypes.STRING, allowNull: false },
     UserId:   { type: DataTypes.INTEGER, allowNull: false, unique: true },
+    // NEW: open/closed switch
     isOpen:   { type: DataTypes.BOOLEAN, allowNull:false , defaultValue: true },
   }, {
     tableName: "vendors",
