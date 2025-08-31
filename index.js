@@ -44,6 +44,9 @@ app.use(
     allowedHeaders: "Content-Type, Authorization, X-Requested-With, Idempotency-Key",
   })
 );
+
+// Ensure preflight works for any route
+app.options("*", cors());
 app.use(express.json());
 
 // ---- HTTP server + Socket.IO ----
