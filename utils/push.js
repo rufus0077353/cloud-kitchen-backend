@@ -11,7 +11,11 @@ if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
 } else {
   webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
 }
-
+/**
+ * Send a push notification to a single subscription
+ * @param {object} sub - PushSubscription JSON browser
+ * @param {object} data - { title, body, icon, url, tag } - all optional
+ */
 async function sendPush(subscription, payloadObj) {
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return false;
   try {
