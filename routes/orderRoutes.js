@@ -1,4 +1,4 @@
-// routes/orderRoutes.js
+
 const express = require("express");
 const router = express.Router();
 const { Op } = require("sequelize");
@@ -19,9 +19,33 @@ function emitToUserHelper(req, userId, event, payload) {
 
 // ---------- helpers ----------
 function parsePageParams(q) {
-  const page = Math.max(1, Number(q.page) || 0);      // 0 means no pagination (legacy)
+  const page = Math.max(1, Number(q.page) || 0); // 0 means no pagination (legacy)
   const pageSize = Math.min(100, Math.max(1, Number(q.pageSize) || 20));
   return { page, pageSize };
+}
+
+// ---- idempotency helpers (safe if table/model missing) ----
+const isMissingTableError = (err) =>
+  !!(err?.original?.code === "42P01" || /no such table|does not exist/i.test(err?.message || ""));
+
+async function safeFindIdempotencyKey(key, userId, t) {
+  if (!key || !IdempotencyKey || typeof IdempotencyKey.findOne !== "function") return null;
+  try {
+    return await IdempotencyKey.findOne({ where: { key, userId }, transaction: t });
+  } catch (err) {
+    if (isMissingTableError(err)) return null; // table not migrated: ignore idempotency
+    throw err;
+  }
+}
+
+async function safeCreateIdempotencyKey(record, t) {
+  if (!IdempotencyKey || typeof IdempotencyKey.create !== "function") return;
+  try {
+    await IdempotencyKey.create(record, { transaction: t });
+  } catch (err) {
+    if (isMissingTableError(err)) return; // ignore if table missing
+    throw err;
+  }
 }
 
 // ----------------- user orders (optionally paginated) -----------------
@@ -192,13 +216,13 @@ router.get(
       start.setHours(0, 0, 0, 0);
       start.setDate(start.getDate() - (days - 1));
 
-      const sequelize = Order.sequelize;
-      const [rows] = await sequelize.query(
+      const sequelizeLocal = Order.sequelize;
+      const [rows] = await sequelizeLocal.query(
         `
         SELECT
           to_char(date_trunc('day', "createdAt"), 'YYYY-MM-DD') AS date,
-          COUNT(*) FILTER (WHERE status <> 'rejected')                                  AS orders,
-          COALESCE(SUM(CASE WHEN status <> 'rejected' THEN "totalAmount" END), 0)       AS revenue
+          COUNT(*) FILTER (WHERE status <> 'rejected')                                       AS orders,
+          COALESCE(SUM(CASE WHEN status <> 'rejected' THEN "totalAmount" END), 0)            AS revenue
         FROM "orders"
         WHERE "VendorId" = :vendorId
           AND "createdAt" >= :startDate
@@ -266,12 +290,10 @@ router.post("/", authenticateToken, async (req, res) => {
       return res.status(400).json({ message: "At least one item is required" });
     }
 
-    // 🟢 STEP 1: check if this idempotency key was already used
+    // STEP 1: idempotency lookup (safe even if table missing)
+    let existingKey = null;
     if (idemKey) {
-      const existingKey = await IdempotencyKey.findOne({
-        where: { key: idemKey, userId: req.user.id },
-        transaction: t,
-      });
+      existingKey = await safeFindIdempotencyKey(idemKey, req.user.id, t);
       if (existingKey?.orderId) {
         const existingOrder = await Order.findByPk(existingKey.orderId, {
           include: [
@@ -346,12 +368,9 @@ router.post("/", authenticateToken, async (req, res) => {
       { transaction: t }
     );
 
-    // 🟢 STEP 2: store the idempotency key
+    // STEP 2: store idempotency key (safe even if table missing)
     if (idemKey) {
-      await IdempotencyKey.create(
-        { key: idemKey, userId: req.user.id, orderId: order.id },
-        { transaction: t }
-      );
+      await safeCreateIdempotencyKey({ key: idemKey, userId: req.user.id, orderId: order.id }, t);
     }
 
     const fullOrder = await Order.findByPk(order.id, {
@@ -370,7 +389,7 @@ router.post("/", authenticateToken, async (req, res) => {
 
     return res.status(201).json({ message: "Order created", order: fullOrder });
   } catch (err) {
-    if (t) {try {await t.rollback();} catch(e){}}
+    try { await t.rollback(); } catch (_) {}
     console.error("POST /api/orders error:", err?.name, err?.message);
     if (err?.name === "SequelizeForeignKeyConstraintError") {
       return res.status(400).json({
@@ -644,6 +663,7 @@ router.get("/:id/invoice", authenticateToken, async (req, res) => {
     return res.status(500).json({ message: "Error generating invoice", error: err.message });
   }
 });
+
 // ----------------- vendor updates status -----------------
 router.patch(
   "/:id/status",
