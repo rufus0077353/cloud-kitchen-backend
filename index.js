@@ -45,9 +45,6 @@ app.use(
   })
 );
 
-// ✅ Express 5-friendly preflight handler (replaces app.options("*", cors()))
-app.options("(.*)", cors());
-
 app.use(express.json());
 // ---- HTTP server + Socket.IO ----
 const server = http.createServer(app);
