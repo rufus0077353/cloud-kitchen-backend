@@ -2,7 +2,7 @@
 const express = require("express");
 const router = express.Router();
 const { Op } = require("sequelize");
-const { Order, OrderItem, Vendor, MenuItem, User } = require("../models");
+const { IdempotencyKey, Order, OrderItem, Vendor, MenuItem, User } = require("../models");
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 
@@ -250,23 +250,49 @@ router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
 
 // ----------------- create order (user) -----------------
 router.post("/", authenticateToken, async (req, res) => {
+  const t = await sequelize.transaction();
   try {
     const { VendorId, items, paymentMethod = "cod" } = req.body;
+    const idemKey = req.get("Idempotency-Key") || null;
 
     const vendorIdNum = Number(VendorId);
     if (!Number.isFinite(vendorIdNum)) {
+      await t.rollback();
       return res.status(400).json({ message: "VendorId must be a number", got: VendorId });
     }
     if (!Array.isArray(items) || items.length === 0) {
+      await t.rollback();
       return res.status(400).json({ message: "At least one item is required" });
     }
 
+    // 🟢 STEP 1: check if this idempotency key was already used
+    if (idemKey) {
+      const existingKey = await IdempotencyKey.findOne({
+        where: { key: idemKey, userId: req.user.id },
+        transaction: t,
+      });
+      if (existingKey?.orderId) {
+        const existingOrder = await Order.findByPk(existingKey.orderId, {
+          include: [
+            { model: User, attributes: ["id", "name", "email"] },
+            { model: Vendor, attributes: ["id", "name", "cuisine"] },
+            { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
+          ],
+          transaction: t,
+        });
+        await t.commit();
+        return res.status(200).json({ message: "Order already created", order: existingOrder });
+      }
+    }
+
+    // Validate items
     const ids = [];
     const cleanItems = [];
     for (const it of items) {
       const mid = Number(it?.MenuItemId);
       const qty = Number(it?.quantity);
       if (!Number.isFinite(mid) || !Number.isFinite(qty) || qty <= 0) {
+        await t.rollback();
         return res.status(400).json({
           message: "Each item must include numeric MenuItemId and quantity (>0)",
           got: it,
@@ -279,11 +305,13 @@ router.post("/", authenticateToken, async (req, res) => {
     const menuRows = await MenuItem.findAll({
       where: { id: ids, VendorId: vendorIdNum },
       attributes: ["id", "price", "name", "VendorId"],
+      transaction: t,
     });
 
     const foundIds = menuRows.map((m) => Number(m.id));
     if (menuRows.length !== ids.length) {
       const missing = ids.filter((id) => !foundIds.includes(id));
+      await t.rollback();
       return res.status(400).json({
         message: "One or more items are invalid for this vendor (check menu item -> vendor mapping).",
         vendorId: vendorIdNum,
@@ -304,17 +332,26 @@ router.post("/", authenticateToken, async (req, res) => {
       VendorId: vendorIdNum,
       totalAmount: computedTotal,
       status: "pending",
-      paymentMethod,                 // 👈 capture method
-      paymentStatus: "unpaid",       // 👈 default
-    });
+      paymentMethod,
+      paymentStatus: "unpaid",
+    }, { transaction: t });
 
     await OrderItem.bulkCreate(
       cleanItems.map((it) => ({
         OrderId: order.id,
         MenuItemId: it.MenuItemId,
         quantity: it.quantity,
-      }))
+      })),
+      { transaction: t }
     );
+
+    // 🟢 STEP 2: store the idempotency key
+    if (idemKey) {
+      await IdempotencyKey.create(
+        { key: idemKey, userId: req.user.id, orderId: order.id },
+        { transaction: t }
+      );
+    }
 
     const fullOrder = await Order.findByPk(order.id, {
       include: [
@@ -322,13 +359,17 @@ router.post("/", authenticateToken, async (req, res) => {
         { model: Vendor, attributes: ["id", "name", "cuisine"] },
         { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
       ],
+      transaction: t,
     });
+
+    await t.commit();
 
     emitToVendorHelper(req, vendorIdNum, "order:new", fullOrder);
     emitToUserHelper(req, req.user.id, "order:new", fullOrder);
 
     return res.status(201).json({ message: "Order created", order: fullOrder });
   } catch (err) {
+    await t.rollback();
     console.error("POST /api/orders error:", err?.name, err?.message);
     if (err?.name === "SequelizeForeignKeyConstraintError") {
       return res.status(400).json({
