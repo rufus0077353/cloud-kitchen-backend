@@ -41,7 +41,7 @@ app.use(
     },
     credentials: true,
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS",
-    allowedHeaders: "Content-Type, Authorization, X-Requested-With",
+    allowedHeaders: "Content-Type, Authorization, X-Requested-With, Idempotency-Key",
   })
 );
 app.use(express.json());
