@@ -5,6 +5,7 @@ const { Op } = require("sequelize");
 const { IdempotencyKey, Order, OrderItem, Vendor, MenuItem, User } = require("../models");
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
+const sequelize = Order.sequelize;
 
 // ----------------- socket helpers -----------------
 function emitToVendorHelper(req, vendorId, event, payload) {
@@ -369,7 +370,7 @@ router.post("/", authenticateToken, async (req, res) => {
 
     return res.status(201).json({ message: "Order created", order: fullOrder });
   } catch (err) {
-    await t.rollback();
+    if (t) {try {await t.rollback();} catch(e){}}
     console.error("POST /api/orders error:", err?.name, err?.message);
     if (err?.name === "SequelizeForeignKeyConstraintError") {
       return res.status(400).json({
