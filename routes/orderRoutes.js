@@ -1,4 +1,3 @@
-
 // backend/routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
@@ -241,8 +240,8 @@ router.get(
         `
         SELECT
           to_char(date_trunc('day', "createdAt"), 'YYYY-MM-DD') AS date,
-          COUNT(*) FILTER (WHERE status <> 'rejected')                                 AS orders,
-          COALESCE(SUM(CASE WHEN status <> 'rejected' THEN "totalAmount" END), 0)      AS revenue
+          COUNT(*) FILTER (WHERE status <> 'rejected')                                       AS orders,
+          COALESCE(SUM(CASE WHEN status <> 'rejected' THEN "totalAmount" END), 0)            AS revenue
         FROM "orders"
         WHERE "VendorId" = :vendorId
           AND "createdAt" >= :startDate
