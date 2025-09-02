@@ -1,5 +1,5 @@
 
-// src/utils/notifications.js
+// utils/notifications.js
 // Minimal, safe no-op notifications helper.
 // Replace with real web-push / email / SMS later if you want.
 
