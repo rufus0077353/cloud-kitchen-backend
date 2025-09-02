@@ -1,13 +1,28 @@
 
+// backend/routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
 const { Op } = require("sequelize");
-const { IdempotencyKey, Order, OrderItem, Vendor, MenuItem, User } = require("../models");
-const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
+
+const {
+  IdempotencyKey,
+  Order,
+  OrderItem,
+  Vendor,
+  MenuItem,
+  User
+} = require("../models");
+
+const {
+  authenticateToken,
+  requireVendor
+} = require("../middleware/authMiddleware");
+
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 const sequelize = Order.sequelize;
+const { notifyUser } = require("../utils/notifications");
 
-// ----------------- socket helpers -----------------
+/* ----------------- socket helpers ----------------- */
 function emitToVendorHelper(req, vendorId, event, payload) {
   const fn = req.emitToVendor || req.app.get("emitToVendor");
   if (typeof fn === "function") fn(vendorId, event, payload);
@@ -17,10 +32,15 @@ function emitToUserHelper(req, userId, event, payload) {
   if (typeof fn === "function") fn(userId, event, payload);
 }
 
-// ---------- helpers ----------
+/* ----------------- helpers ----------------- */
 function parsePageParams(q) {
-  const page = Math.max(1, Number(q.page) || 0); // 0 means no pagination (legacy)
-  const pageSize = Math.min(100, Math.max(1, Number(q.pageSize) || 20));
+  // page=0 => no pagination (legacy mode)
+  const pageRaw = Number(q.page);
+  const page = Number.isFinite(pageRaw) ? Math.max(0, pageRaw) : 0;
+  const pageSizeRaw = Number(q.pageSize);
+  const pageSize = Number.isFinite(pageSizeRaw)
+    ? Math.min(100, Math.max(1, pageSizeRaw))
+    : 20;
   return { page, pageSize };
 }
 
@@ -48,7 +68,7 @@ async function safeCreateIdempotencyKey(record, t) {
   }
 }
 
-// ----------------- user orders (optionally paginated) -----------------
+/* ----------------- user orders (optionally paginated) ----------------- */
 router.get("/my", authenticateToken, async (req, res) => {
   try {
     const { page, pageSize } = parsePageParams(req.query);
@@ -88,7 +108,7 @@ router.get("/my", authenticateToken, async (req, res) => {
   }
 });
 
-// ----------------- vendor (current) orders — optionally paginated -----------------
+/* ----------------- vendor (current) orders — optionally paginated ----------------- */
 router.get(
   "/vendor",
   authenticateToken,
@@ -135,7 +155,7 @@ router.get(
   }
 );
 
-// ----------------- vendor summary (keep before /vendor/:vendorId) -----------------
+/* ----------------- vendor summary (keep before /vendor/:vendorId) ----------------- */
 router.get(
   "/vendor/summary",
   authenticateToken,
@@ -201,7 +221,7 @@ router.get(
   }
 );
 
-// GET /api/orders/vendor/daily?days=14  — unchanged (for charts)
+/* ----------------- vendor daily (for charts) ----------------- */
 router.get(
   "/vendor/daily",
   authenticateToken,
@@ -221,8 +241,8 @@ router.get(
         `
         SELECT
           to_char(date_trunc('day', "createdAt"), 'YYYY-MM-DD') AS date,
-          COUNT(*) FILTER (WHERE status <> 'rejected')                                       AS orders,
-          COALESCE(SUM(CASE WHEN status <> 'rejected' THEN "totalAmount" END), 0)            AS revenue
+          COUNT(*) FILTER (WHERE status <> 'rejected')                                 AS orders,
+          COALESCE(SUM(CASE WHEN status <> 'rejected' THEN "totalAmount" END), 0)      AS revenue
         FROM "orders"
         WHERE "VendorId" = :vendorId
           AND "createdAt" >= :startDate
@@ -253,7 +273,7 @@ router.get(
   }
 );
 
-// ----------------- vendor (any) orders by id (legacy) -----------------
+/* ----------------- vendor (any) orders by id (legacy) ----------------- */
 router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
   try {
     const idNum = Number(req.params.vendorId);
@@ -273,17 +293,17 @@ router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
   }
 });
 
-// ----------------- create order (user) -----------------
+/* ----------------- create order (user) ----------------- */
 router.post("/", authenticateToken, async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const { VendorId, items, paymentMethod = "cod" } = req.body;
+    const { VendorId, vendorId, items, paymentMethod = "mock_online", note, address } = req.body;
     const idemKey = req.get("Idempotency-Key") || null;
 
-    const vendorIdNum = Number(VendorId);
+    const vendorIdNum = Number(VendorId || vendorId);
     if (!Number.isFinite(vendorIdNum)) {
       await t.rollback();
-      return res.status(400).json({ message: "VendorId must be a number", got: VendorId });
+      return res.status(400).json({ message: "VendorId must be a number", got: VendorId ?? vendorId });
     }
     if (!Array.isArray(items) || items.length === 0) {
       await t.rollback();
@@ -291,9 +311,8 @@ router.post("/", authenticateToken, async (req, res) => {
     }
 
     // STEP 1: idempotency lookup (safe even if table missing)
-    let existingKey = null;
     if (idemKey) {
-      existingKey = await safeFindIdempotencyKey(idemKey, req.user.id, t);
+      const existingKey = await safeFindIdempotencyKey(idemKey, req.user.id, t);
       if (existingKey?.orderId) {
         const existingOrder = await Order.findByPk(existingKey.orderId, {
           include: [
@@ -308,13 +327,13 @@ router.post("/", authenticateToken, async (req, res) => {
       }
     }
 
-    // Validate items
+    // Validate / normalize items
     const ids = [];
     const cleanItems = [];
     for (const it of items) {
       const mid = Number(it?.MenuItemId);
-      const qty = Number(it?.quantity);
-      if (!Number.isFinite(mid) || !Number.isFinite(qty) || qty <= 0) {
+      const qty = Math.max(1, Number(it?.quantity || 0));
+      if (!Number.isFinite(mid) || !Number.isFinite(qty)) {
         await t.rollback();
         return res.status(400).json({
           message: "Each item must include numeric MenuItemId and quantity (>0)",
@@ -325,6 +344,7 @@ router.post("/", authenticateToken, async (req, res) => {
       cleanItems.push({ MenuItemId: mid, quantity: qty });
     }
 
+    // Load menu items to ensure all belong to this vendor + get prices
     const menuRows = await MenuItem.findAll({
       where: { id: ids, VendorId: vendorIdNum },
       attributes: ["id", "price", "name", "VendorId"],
@@ -350,6 +370,7 @@ router.post("/", authenticateToken, async (req, res) => {
       0
     );
 
+    // Create order
     const order = await Order.create({
       UserId: req.user.id,
       VendorId: vendorIdNum,
@@ -357,8 +378,11 @@ router.post("/", authenticateToken, async (req, res) => {
       status: "pending",
       paymentMethod,
       paymentStatus: "unpaid",
+      note: note || null,
+      address: address || null,
     }, { transaction: t });
 
+    // Create line items
     await OrderItem.bulkCreate(
       cleanItems.map((it) => ({
         OrderId: order.id,
@@ -368,11 +392,12 @@ router.post("/", authenticateToken, async (req, res) => {
       { transaction: t }
     );
 
-    // STEP 2: store idempotency key (safe even if table missing)
+    // STEP 2: store idempotency key (safe if table missing)
     if (idemKey) {
       await safeCreateIdempotencyKey({ key: idemKey, userId: req.user.id, orderId: order.id }, t);
     }
 
+    // Reload full order (with includes)
     const fullOrder = await Order.findByPk(order.id, {
       include: [
         { model: User, attributes: ["id", "name", "email"] },
@@ -384,6 +409,7 @@ router.post("/", authenticateToken, async (req, res) => {
 
     await t.commit();
 
+    // Live updates
     emitToVendorHelper(req, vendorIdNum, "order:new", fullOrder);
     emitToUserHelper(req, req.user.id, "order:new", fullOrder);
 
@@ -404,7 +430,7 @@ router.post("/", authenticateToken, async (req, res) => {
   }
 });
 
-// ----------------- update/delete/filter/invoice -----------------
+/* ----------------- update (admin/legacy), delete, filter, invoice ----------------- */
 router.put("/:id", authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { totalAmount, items } = req.body;
@@ -429,6 +455,53 @@ router.put("/:id", authenticateToken, async (req, res) => {
     res.status(500).json({ message: "Error updating order", error: err.message });
   }
 });
+
+// Vendor updates order status (accept / ready / delivered / rejected)
+router.patch(
+  "/:id/status",
+  authenticateToken,
+  requireVendor,
+  ensureVendorProfile,
+  async (req, res) => {
+    try {
+      const vendorId = req.vendor.id;
+      const { id } = req.params;
+      const { status } = req.body;
+
+      const allowed = ["pending", "accepted", "rejected", "ready", "delivered"];
+      if (!allowed.includes(status)) {
+        return res.status(400).json({ message: "Invalid status" });
+      }
+
+      const order = await Order.findByPk(id);
+      if (!order) return res.status(404).json({ message: "Order not found" });
+      if (order.VendorId !== vendorId) {
+        return res.status(403).json({ message: "Not your order" });
+      }
+
+      order.status = status;
+      await order.save();
+
+      // live in-app updates via sockets
+      emitToVendorHelper(req, order.VendorId, "order:status", { id: order.id, status: order.status });
+      emitToUserHelper(req, order.UserId, "order:status", { id: order.id, status: order.status, UserId: order.UserId });
+
+      // Optional push notification
+      try {
+        const title = `Order #${order.id} is ${order.status}`;
+        const body  = `Vendor updated your order to "${order.status}".`;
+        const url   = `/orders`;
+        await notifyUser(order.UserId, { title, body, url, tag: `order-${order.id}` });
+      } catch (e) {
+        console.warn("push notify failed:", e?.message);
+      }
+
+      return res.json({ message: "Status updated", order });
+    } catch (err) {
+      return res.status(500).json({ message: "Failed to update status", error: err.message });
+    }
+  }
+);
 
 router.delete("/:id", authenticateToken, async (req, res) => {
   try {
@@ -485,7 +558,6 @@ router.get("/:id/invoice", authenticateToken, async (req, res) => {
     });
     if (!order) return res.status(404).json({ message: "Order not found" });
 
-    // ---- helpers ----
     const escapeHtml = (s = "") =>
       String(s)
         .replace(/&/g, "&amp;")
@@ -517,14 +589,10 @@ router.get("/:id/invoice", authenticateToken, async (req, res) => {
       0
     );
 
-    // Optional: show a logo if you set INVOICE_LOGO_URL in env
     const LOGO = process.env.INVOICE_LOGO_URL || "";
-
-    const paymentMethod =
-      order.paymentMethod === "mock_online" ? "Online (Mock)" : (order.paymentMethod || "COD");
+    const paymentMethod = order.paymentMethod === "mock_online" ? "Online (Mock)" : (order.paymentMethod || "COD");
     const paymentStatus = order.paymentStatus || "unpaid";
     const paidAt = order.paidAt ? new Date(order.paidAt).toLocaleString("en-IN") : "";
-
     const createdAt = order.createdAt ? new Date(order.createdAt).toLocaleString("en-IN") : "-";
 
     const html = `<!DOCTYPE html>
@@ -534,60 +602,32 @@ router.get("/:id/invoice", authenticateToken, async (req, res) => {
 <title>Invoice #${order.id}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
-  :root{
-    --ink:#111; --muted:#6b7280; --line:#e5e7eb; --brand:#111827;
-  }
+  :root{ --ink:#111; --muted:#6b7280; --line:#e5e7eb; --brand:#111827; }
   *{ box-sizing: border-box; }
-  body{
-    font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
-    color: var(--ink);
-    margin: 0; padding: 24px;
-    background: #fff;
-  }
+  body{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji"; color: var(--ink); margin: 0; padding: 24px; background: #fff; }
   .wrap{ max-width: 860px; margin: 0 auto; }
-  header{
-    display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px;
-  }
+  header{ display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
   .brand{ display:flex; align-items:center; gap:12px; }
   .brand img{ max-height: 48px; width: auto; }
   h1{ margin:0; font-size: 20px; }
   .muted{ color: var(--muted); }
-  .grid{
-    display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0 24px;
-  }
-  .card{
-    border: 1px solid var(--line); border-radius: 10px; padding: 14px;
-  }
+  .grid{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0 24px; }
+  .card{ border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
   table{ width: 100%; border-collapse: collapse; }
-  thead th{
-    text-align: left; font-size: 12px; color: var(--muted);
-    border-bottom: 1px solid var(--line); padding: 10px 8px;
-  }
+  thead th{ text-align: left; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); padding: 10px 8px; }
   tbody td{ padding: 10px 8px; border-bottom: 1px solid var(--line); }
   .right{ text-align: right; }
-  .totals{
-    display: grid; grid-template-columns: 1fr 280px; gap: 16px; margin-top: 12px; align-items: start;
-  }
-  .totals .box{
-    border: 1px solid var(--line); border-radius: 10px; padding: 12px;
-  }
+  .totals{ display: grid; grid-template-columns: 1fr 280px; gap: 16px; margin-top: 12px; align-items: start; }
+  .totals .box{ border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
   .totals .row{ display:flex; justify-content: space-between; margin: 6px 0; }
   .grand{ font-weight: 700; font-size: 16px; }
-  .badge{
-    display:inline-block; padding: 3px 8px; border-radius: 999px; font-size: 12px; border:1px solid var(--line);
-  }
+  .badge{ display:inline-block; padding: 3px 8px; border-radius: 999px; font-size: 12px; border:1px solid var(--line); }
   .paid{ background:#ecfdf5; border-color:#a7f3d0; }
   .unpaid{ background:#f9fafb; }
   .failed{ background:#fef2f2; border-color:#fecaca; }
   .actions{ margin: 18px 0 8px; }
-  .btn{
-    background:#111827; color:#fff; border:0; padding:10px 14px; border-radius:8px; cursor:pointer;
-  }
-  @media print {
-    .no-print, .actions { display: none !important; }
-    body{ padding: 0; }
-    @page { size: A4; margin: 14mm; }
-  }
+  .btn{ background:#111827; color:#fff; border:0; padding:10px 14px; border-radius:8px; cursor:pointer; }
+  @media print { .no-print, .actions { display: none !important; } body{ padding: 0; } @page { size: A4; margin: 14mm; } }
 </style>
 </head>
 <body>
@@ -663,39 +703,5 @@ router.get("/:id/invoice", authenticateToken, async (req, res) => {
     return res.status(500).json({ message: "Error generating invoice", error: err.message });
   }
 });
-
-// ----------------- vendor updates status -----------------
-router.patch(
-  "/:id/status",
-  authenticateToken,
-  requireVendor,
-  ensureVendorProfile,
-  async (req, res) => {
-    try {
-      const vendorId = req.vendor.id;
-      const { id } = req.params;
-      const { status } = req.body;
-
-      const allowed = ["pending", "accepted", "rejected", "ready", "delivered"];
-      if (!allowed.includes(status)) {
-        return res.status(400).json({ message: "Invalid status" });
-      }
-
-      const order = await Order.findByPk(id);
-      if (!order) return res.status(404).json({ message: "Order not found" });
-      if (order.VendorId !== vendorId) return res.status(403).json({ message: "Not your order" });
-
-      order.status = status;
-      await order.save();
-
-      emitToVendorHelper(req, order.VendorId, "order:status", { id: order.id, status: order.status });
-      emitToUserHelper(req, order.UserId, "order:status", { id: order.id, status: order.status, UserId: order.UserId });
-
-      res.json({ message: "Status updated", order });
-    } catch (err) {
-      res.status(500).json({ message: "Failed to update status", error: err.message });
-    }
-  }
-);
 
 module.exports = router;
