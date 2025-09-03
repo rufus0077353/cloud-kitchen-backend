@@ -108,6 +108,50 @@ router.get("/my", authenticateToken, async (req, res) => {
   }
 });
 
+// User cancels their own pending order
+router.patch("/:id/cancel", authenticateToken, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid order id" });
+
+    const order = await Order.findByPk(id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    // Must be the owner
+    if (Number(order.UserId) !== Number(req.user.id)) {
+      return res.status(403).json({ message: "You can only cancel your own order" });
+    }
+
+    // Only cancel when still pending
+    if ((order.status || "").toLowerCase() !== "pending") {
+      return res.status(400).json({ message: "Only pending orders can be cancelled" });
+    }
+
+    // Minimal-change MVP: use the existing "rejected" status
+    order.status = "rejected";
+    await order.save();
+
+    // live updates
+    emitToVendorHelper(req, order.VendorId, "order:status", { id: order.id, status: order.status });
+    emitToUserHelper(req, order.UserId, "order:status", { id: order.id, status: order.status, UserId: order.UserId });
+
+    // Optional: push notify vendor (and/or user)
+    try {
+      const title = `Order #${order.id} cancelled`;
+      const body  = `User cancelled the order while pending.`;
+      const url   = `/vendor/orders`;
+      await notifyUser(order.UserId, { title, body: "You cancelled your order.", url: `/orders`, tag: `order-${order.id}` });
+      // If you have a "notifyVendor" util, call it here similarly.
+    } catch (e) {
+      console.warn("cancel notify failed:", e?.message);
+    }
+
+    return res.json({ message: "Order cancelled", order });
+  } catch (err) {
+    return res.status(500).json({ message: "Failed to cancel order", error: err.message });
+  }
+});
+
 /* ----------------- vendor (current) orders — optionally paginated ----------------- */
 router.get(
   "/vendor",
