@@ -32,6 +32,28 @@ function emitToUserHelper(req, userId, event, payload) {
   if (typeof fn === "function") fn(userId, event, payload);
 }
 
+/* ----------------- safe inline audit logger ----------------- */
+/** Writes to AuditLog if model exists; otherwise no-ops. */
+async function audit(req, { action, order = null, details = {} }) {
+  try {
+    const { AuditLog } = require("../models");
+    if (!AuditLog || typeof AuditLog.create !== "function") return;
+    await AuditLog.create({
+      userId: req.user?.id ?? null,
+      vendorId: order?.VendorId ?? null,
+      action,
+      details: {
+        orderId: order?.id ?? null,
+        status: order?.status ?? null,
+        ...details,
+      },
+    });
+  } catch (e) {
+    // Never interrupt request flow because of logging
+    console.warn("AuditLog skipped:", e?.message || e);
+  }
+}
+
 /* ----------------- helpers ----------------- */
 function parsePageParams(q) {
   // page=0 => no pagination (legacy mode)
@@ -244,7 +266,7 @@ router.get(
         `
         SELECT
           to_char(date_trunc('day', "createdAt"), 'YYYY-MM-DD') AS date,
-          COUNT(*) FILTER (WHERE status NOT IN ('rejected','canceled'))                              AS orders,
+          COUNT(*) FILTER (WHERE status NOT IN ('rejected','canceled'))                       AS orders,
           COALESCE(SUM(CASE WHEN status NOT IN ('rejected','canceled') THEN "totalAmount" END), 0)  AS revenue
         FROM "orders"
         WHERE "VendorId" = :vendorId
@@ -449,6 +471,13 @@ router.post("/", authenticateToken, async (req, res) => {
     emitToVendorHelper(req, vendorIdNum, "order:new", fullOrder);
     emitToUserHelper(req, req.user.id, "order:new", fullOrder);
 
+    // Audit
+    await audit(req, {
+      action: "ORDER_CREATED",
+      order: fullOrder,
+      details: { items: cleanItems, totalAmount: computedTotal, paymentMethod }
+    });
+
     return res.status(201).json({ message: "Order created", order: fullOrder });
   } catch (err) {
     try { await t.rollback(); } catch (_) {}
@@ -504,6 +533,13 @@ router.patch("/:id/cancel", authenticateToken, async (req, res) => {
     } catch (e) {
       console.warn("push notify failed:", e?.message);
     }
+
+    // Audit
+    await audit(req, {
+      action: "ORDER_CANCELED",
+      order,
+      details: { by: isOwnerUser ? "user" : "admin" }
+    });
 
     return res.json({ message: "Order canceled", order });
   } catch (err) {
@@ -578,6 +614,13 @@ router.patch(
         console.warn("push notify failed:", e?.message);
       }
 
+      // Audit
+      await audit(req, {
+        action: "ORDER_STATUS_UPDATE",
+        order,
+        details: { by: "vendor", newStatus: status }
+      });
+
       return res.json({ message: "Status updated", order });
     } catch (err) {
       return res.status(500).json({ message: "Failed to update status", error: err.message });
@@ -593,6 +636,13 @@ router.delete("/:id", authenticateToken, async (req, res) => {
 
     await OrderItem.destroy({ where: { OrderId: order.id } });
     await order.destroy();
+
+    // Audit
+    await audit(req, {
+      action: "ORDER_DELETED",
+      order,
+      details: { by: req.user?.role || "user" }
+    });
 
     res.json({ message: "Order deleted successfully" });
   } catch (err) {
