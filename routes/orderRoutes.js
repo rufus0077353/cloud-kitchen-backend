@@ -108,50 +108,6 @@ router.get("/my", authenticateToken, async (req, res) => {
   }
 });
 
-// User cancels their own pending order
-router.patch("/:id/cancel", authenticateToken, async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid order id" });
-
-    const order = await Order.findByPk(id);
-    if (!order) return res.status(404).json({ message: "Order not found" });
-
-    // Must be the owner
-    if (Number(order.UserId) !== Number(req.user.id)) {
-      return res.status(403).json({ message: "You can only cancel your own order" });
-    }
-
-    // Only cancel when still pending
-    if ((order.status || "").toLowerCase() !== "pending") {
-      return res.status(400).json({ message: "Only pending orders can be cancelled" });
-    }
-
-    // Minimal-change MVP: use the existing "rejected" status
-    order.status = "rejected";
-    await order.save();
-
-    // live updates
-    emitToVendorHelper(req, order.VendorId, "order:status", { id: order.id, status: order.status });
-    emitToUserHelper(req, order.UserId, "order:status", { id: order.id, status: order.status, UserId: order.UserId });
-
-    // Optional: push notify vendor (and/or user)
-    try {
-      const title = `Order #${order.id} cancelled`;
-      const body  = `User cancelled the order while pending.`;
-      const url   = `/vendor/orders`;
-      await notifyUser(order.UserId, { title, body: "You cancelled your order.", url: `/orders`, tag: `order-${order.id}` });
-      // If you have a "notifyVendor" util, call it here similarly.
-    } catch (e) {
-      console.warn("cancel notify failed:", e?.message);
-    }
-
-    return res.json({ message: "Order cancelled", order });
-  } catch (err) {
-    return res.status(500).json({ message: "Failed to cancel order", error: err.message });
-  }
-});
-
 /* ----------------- vendor (current) orders — optionally paginated ----------------- */
 router.get(
   "/vendor",
@@ -216,14 +172,16 @@ router.get(
       const startOfWeek  = () => { const d = new Date(); const diff = (d.getDay()+6)%7; d.setHours(0,0,0,0); d.setDate(d.getDate()-diff); return d; };
       const startOfMonth = () => { const d = new Date(); d.setHours(0,0,0,0); d.setDate(1); return d; };
 
-      const nonRejectedWhere = { VendorId: vendorId, status: { [Op.ne]: "rejected" } };
+      // exclude canceled & rejected from revenue
+      const nonRevenueStatuses = ["rejected", "canceled"];
+      const revenueWhere = { VendorId: vendorId, status: { [Op.notIn]: nonRevenueStatuses } };
 
       const [totalOrders, lifetimeRevenue] = await Promise.all([
         Order.count({ where: { VendorId: vendorId } }),
-        Order.sum("totalAmount", { where: nonRejectedWhere }),
+        Order.sum("totalAmount", { where: revenueWhere }),
       ]);
 
-      const ST = ["pending", "accepted", "ready", "delivered", "rejected"];
+      const ST = ["pending", "accepted", "ready", "delivered", "rejected", "canceled"];
       const statusCounts = {};
       await Promise.all(
         ST.map(async (s) => {
@@ -237,17 +195,17 @@ router.get(
 
       const [ordersToday, revenueToday] = await Promise.all([
         Order.count({ where: { VendorId: vendorId, createdAt: { [Op.gte]: todayStart } } }),
-        Order.sum("totalAmount", { where: { ...nonRejectedWhere, createdAt: { [Op.gte]: todayStart } } }),
+        Order.sum("totalAmount", { where: { ...revenueWhere, createdAt: { [Op.gte]: todayStart } } }),
       ]);
 
       const [ordersWeek, revenueWeek] = await Promise.all([
         Order.count({ where: { VendorId: vendorId, createdAt: { [Op.gte]: weekStart } } }),
-        Order.sum("totalAmount", { where: { ...nonRejectedWhere, createdAt: { [Op.gte]: weekStart } } }),
+        Order.sum("totalAmount", { where: { ...revenueWhere, createdAt: { [Op.gte]: weekStart } } }),
       ]);
 
       const [ordersMonth, revenueMonth] = await Promise.all([
         Order.count({ where: { VendorId: vendorId, createdAt: { [Op.gte]: monthStart } } }),
-        Order.sum("totalAmount", { where: { ...nonRejectedWhere, createdAt: { [Op.gte]: monthStart } } }),
+        Order.sum("totalAmount", { where: { ...revenueWhere, createdAt: { [Op.gte]: monthStart } } }),
       ]);
 
       res.json({
@@ -281,12 +239,13 @@ router.get(
       start.setDate(start.getDate() - (days - 1));
 
       const sequelizeLocal = Order.sequelize;
+      // exclude canceled & rejected from revenue and order count
       const [rows] = await sequelizeLocal.query(
         `
         SELECT
           to_char(date_trunc('day', "createdAt"), 'YYYY-MM-DD') AS date,
-          COUNT(*) FILTER (WHERE status <> 'rejected')                                               AS orders,
-          COALESCE(SUM(CASE WHEN status <> 'rejected' THEN "totalAmount" END), 0)                    AS revenue
+          COUNT(*) FILTER (WHERE status NOT IN ('rejected','canceled'))                              AS orders,
+          COALESCE(SUM(CASE WHEN status NOT IN ('rejected','canceled') THEN "totalAmount" END), 0)  AS revenue
         FROM "orders"
         WHERE "VendorId" = :vendorId
           AND "createdAt" >= :startDate
@@ -337,7 +296,310 @@ router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- filter BEFORE :id to avoid shadowing ----------------- */
+
+// GET one order (user can see their own, vendor can see theirs, admin can see all)
+router.get("/:id", authenticateToken, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid order id" });
+
+    const order = await Order.findByPk(id, {
+      include: [
+        { model: User, attributes: ["id", "name", "email"] },
+        { model: Vendor, attributes: ["id", "name", "cuisine"] },
+        { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
+      ],
+    });
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    const role = req.user?.role || "user";
+    const isOwnerUser   = Number(order.UserId)   === Number(req.user.id);
+    const vendorIdClaim = req.vendor?.id || req.user?.vendorId;
+    const isOwnerVendor = vendorIdClaim && Number(order.VendorId) === Number(vendorIdClaim);
+    const isAdmin       = role === "admin";
+
+    if (!(isOwnerUser || isOwnerVendor || isAdmin)) {
+      return res.status(403).json({ message: "Not authorized to view this order" });
+    }
+
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching order", error: err.message });
+  }
+});
+
+
+/* ----------------- create order (user) ----------------- */
+router.post("/", authenticateToken, async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const { VendorId, vendorId, items, paymentMethod = "mock_online", note, address } = req.body;
+    const idemKey = req.get("Idempotency-Key") || null;
+
+    const vendorIdNum = Number(VendorId || vendorId);
+    if (!Number.isFinite(vendorIdNum)) {
+      await t.rollback();
+      return res.status(400).json({ message: "VendorId must be a number", got: VendorId ?? vendorId });
+    }
+    if (!Array.isArray(items) || items.length === 0) {
+      await t.rollback();
+      return res.status(400).json({ message: "At least one item is required" });
+    }
+
+    // STEP 1: idempotency lookup (safe even if table missing)
+    if (idemKey) {
+      const existingKey = await safeFindIdempotencyKey(idemKey, req.user.id, t);
+      if (existingKey?.orderId) {
+        const existingOrder = await Order.findByPk(existingKey.orderId, {
+          include: [
+            { model: User, attributes: ["id", "name", "email"] },
+            { model: Vendor, attributes: ["id", "name", "cuisine"] },
+            { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
+          ],
+          transaction: t,
+        });
+        await t.commit();
+        return res.status(200).json({ message: "Order already created", order: existingOrder });
+      }
+    }
+
+    // Validate / normalize items
+    const ids = [];
+    const cleanItems = [];
+    for (const it of items) {
+      const mid = Number(it?.MenuItemId);
+      const qty = Math.max(1, Number(it?.quantity || 0));
+      if (!Number.isFinite(mid) || !Number.isFinite(qty)) {
+        await t.rollback();
+        return res.status(400).json({
+          message: "Each item must include numeric MenuItemId and quantity (>0)",
+          got: it,
+        });
+      }
+      ids.push(mid);
+      cleanItems.push({ MenuItemId: mid, quantity: qty });
+    }
+
+    // Load menu items to ensure all belong to this vendor + get prices
+    const menuRows = await MenuItem.findAll({
+      where: { id: ids, VendorId: vendorIdNum },
+      attributes: ["id", "price", "name", "VendorId"],
+      transaction: t,
+    });
+
+    const foundIds = menuRows.map((m) => Number(m.id));
+    if (menuRows.length !== ids.length) {
+      const missing = ids.filter((id) => !foundIds.includes(id));
+      await t.rollback();
+      return res.status(400).json({
+        message: "One or more items are invalid for this vendor (check menu item -> vendor mapping).",
+        vendorId: vendorIdNum,
+        requestedItemIds: ids,
+        foundForVendor: foundIds,
+        missingForVendor: missing,
+      });
+    }
+
+    const priceMap = new Map(menuRows.map((m) => [Number(m.id), Number(m.price) || 0]));
+    const computedTotal = cleanItems.reduce(
+      (sum, it) => sum + (priceMap.get(it.MenuItemId) || 0) * it.quantity,
+      0
+    );
+
+    // Create order
+    const order = await Order.create({
+      UserId: req.user.id,
+      VendorId: vendorIdNum,
+      totalAmount: computedTotal,
+      status: "pending",
+      paymentMethod,
+      paymentStatus: "unpaid",
+      note: note || null,
+      address: address || null,
+    }, { transaction: t });
+
+    // Create line items
+    await OrderItem.bulkCreate(
+      cleanItems.map((it) => ({
+        OrderId: order.id,
+        MenuItemId: it.MenuItemId,
+        quantity: it.quantity,
+      })),
+      { transaction: t }
+    );
+
+    // STEP 2: store idempotency key (safe if table missing)
+    if (idemKey) {
+      await safeCreateIdempotencyKey({ key: idemKey, userId: req.user.id, orderId: order.id }, t);
+    }
+
+    // Reload full order (with includes)
+    const fullOrder = await Order.findByPk(order.id, {
+      include: [
+        { model: User, attributes: ["id", "name", "email"] },
+        { model: Vendor, attributes: ["id", "name", "cuisine"] },
+        { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
+      ],
+      transaction: t,
+    });
+
+    await t.commit();
+
+    // Live updates
+    emitToVendorHelper(req, vendorIdNum, "order:new", fullOrder);
+    emitToUserHelper(req, req.user.id, "order:new", fullOrder);
+
+    return res.status(201).json({ message: "Order created", order: fullOrder });
+  } catch (err) {
+    try { await t.rollback(); } catch (_) {}
+    console.error("POST /api/orders error:", err?.name, err?.message);
+    if (err?.name === "SequelizeForeignKeyConstraintError") {
+      return res.status(400).json({
+        message: "Invalid foreign key (user/vendor/menu item mismatch). Check payload IDs.",
+        error: err.message,
+      });
+    }
+    if (err?.name === "SequelizeValidationError") {
+      return res.status(400).json({ message: "Validation failed", errors: err.errors });
+    }
+    return res.status(500).json({ message: "Error creating order", error: err.message });
+  }
+});
+
+/* ----------------- user cancel (soft) ----------------- */
+router.patch("/:id/cancel", authenticateToken, async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    if (!Number.isFinite(orderId)) {
+      return res.status(400).json({ message: "Invalid order id" });
+    }
+
+    const order = await Order.findByPk(orderId);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    const role = req.user?.role || "user";
+    const isOwnerUser = Number(order.UserId) === Number(req.user.id);
+    const isAdmin = role === "admin";
+    if (!(isOwnerUser || isAdmin)) {
+      return res.status(403).json({ message: "Not authorized to cancel this order" });
+    }
+
+    if (order.status !== "pending") {
+      return res.status(400).json({ message: "Only pending orders can be canceled" });
+    }
+
+    order.status = "canceled";
+    await order.save();
+
+    // live updates
+    emitToVendorHelper(req, order.VendorId, "order:status", { id: order.id, status: order.status });
+    emitToUserHelper(req, order.UserId, "order:status", { id: order.id, status: order.status, UserId: order.UserId });
+
+    // notify
+    try {
+      const title = `Order #${order.id} is canceled`;
+      const body  = `You canceled this order.`;
+      const url   = `/orders`;
+      await notifyUser(order.UserId, { title, body, url, tag: `order-${order.id}` });
+    } catch (e) {
+      console.warn("push notify failed:", e?.message);
+    }
+
+    return res.json({ message: "Order canceled", order });
+  } catch (err) {
+    return res.status(500).json({ message: "Failed to cancel order", error: err.message });
+  }
+});
+
+/* ----------------- update (admin/legacy), delete, filter, invoice ----------------- */
+router.put("/:id", authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { totalAmount, items } = req.body;
+
+  try {
+    const order = await Order.findByPk(id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    if (totalAmount !== undefined) order.totalAmount = totalAmount;
+    await order.save();
+
+    if (Array.isArray(items) && items.length) {
+      await OrderItem.destroy({ where: { OrderId: id } });
+      await OrderItem.bulkCreate(items.map((it) => ({
+        OrderId: id,
+        MenuItemId: it.MenuItemId,
+        quantity: it.quantity,
+      })));
+    }
+    res.json({ message: "Order updated successfully", order });
+  } catch (err) {
+    res.status(500).json({ message: "Error updating order", error: err.message });
+  }
+});
+
+// Vendor updates order status (accept / ready / delivered / rejected)
+// (Vendor **cannot** set "canceled" here)
+router.patch(
+  "/:id/status",
+  authenticateToken,
+  requireVendor,
+  ensureVendorProfile,
+  async (req, res) => {
+    try {
+      const vendorId = req.vendor.id;
+      const { id } = req.params;
+      const { status } = req.body;
+
+      const allowed = ["pending", "accepted", "rejected", "ready", "delivered"];
+      if (!allowed.includes(status)) {
+        return res.status(400).json({ message: "Invalid status" });
+      }
+
+      const order = await Order.findByPk(id);
+      if (!order) return res.status(404).json({ message: "Order not found" });
+      if (order.VendorId !== vendorId) {
+        return res.status(403).json({ message: "Not your order" });
+      }
+
+      order.status = status;
+      await order.save();
+
+      // live in-app updates via sockets
+      emitToVendorHelper(req, order.VendorId, "order:status", { id: order.id, status: order.status });
+      emitToUserHelper(req, order.UserId, "order:status", { id: order.id, status: order.status, UserId: order.UserId });
+
+      // Optional push notification
+      try {
+        const title = `Order #${order.id} is ${order.status}`;
+        const body  = `Vendor updated your order to "${order.status}".`;
+        const url   = `/orders`;
+        await notifyUser(order.UserId, { title, body, url, tag: `order-${order.id}` });
+      } catch (e) {
+        console.warn("push notify failed:", e?.message);
+      }
+
+      return res.json({ message: "Status updated", order });
+    } catch (err) {
+      return res.status(500).json({ message: "Failed to update status", error: err.message });
+    }
+  }
+);
+
+// (Optional) hard delete — consider restricting to admins only
+router.delete("/:id", authenticateToken, async (req, res) => {
+  try {
+    const order = await Order.findByPk(req.params.id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    await OrderItem.destroy({ where: { OrderId: order.id } });
+    await order.destroy();
+
+    res.json({ message: "Order deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ message: "Error deleting order", error: err.message });
+  }
+});
+
 router.get("/filter", authenticateToken, async (req, res) => {
   const { UserId, VendorId, status, startDate, endDate } = req.query;
 
@@ -367,7 +629,7 @@ router.get("/filter", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- invoice BEFORE :id ----------------- */
+// HTML invoice (download/print from UI)
 router.get("/:id/invoice", authenticateToken, async (req, res) => {
   try {
     const order = await Order.findByPk(req.params.id, {
@@ -522,305 +784,6 @@ router.get("/:id/invoice", authenticateToken, async (req, res) => {
     return res.send(html);
   } catch (err) {
     return res.status(500).json({ message: "Error generating invoice", error: err.message });
-  }
-});
-
-/* ----------------- GET single order (full payload) ----------------- */
-router.get("/:id", authenticateToken, async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid order id" });
-
-    const order = await Order.findByPk(id, {
-      include: [
-        { model: User, attributes: ["id", "name", "email"] },
-        { model: Vendor, attributes: ["id", "name", "cuisine"] },
-        { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
-      ],
-    });
-    if (!order) return res.status(404).json({ message: "Order not found" });
-
-    const role = req.user?.role || "user";
-    const isOwnerUser   = Number(order.UserId)   === Number(req.user.id);
-    const vendorIdClaim = req.vendor?.id || req.user?.vendorId;
-    const isOwnerVendor = vendorIdClaim && Number(order.VendorId) === Number(vendorIdClaim);
-    const isAdmin       = role === "admin";
-
-    if (!(isOwnerUser || isOwnerVendor || isAdmin)) {
-      return res.status(403).json({ message: "Not authorized to view this order" });
-    }
-
-    res.json(order);
-  } catch (err) {
-    res.status(500).json({ message: "Error fetching order", error: err.message });
-  }
-});
-
-/* ----------------- TRACKING (lean payload) -----------------
-   Accepts both /:id/track and /track/:id for flexibility.
-------------------------------------------------------------- */
-async function handleTrack(req, res) {
-  try {
-    const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid order id" });
-
-    const order = await Order.findByPk(id, {
-      include: [
-        { model: Vendor, attributes: ["id", "name"] },
-        { model: User, attributes: ["id"] },
-      ],
-      attributes: ["id", "status", "paymentStatus", "paymentMethod", "totalAmount", "createdAt", "paidAt", "VendorId", "UserId"]
-    });
-    if (!order) return res.status(404).json({ message: "Order not found" });
-
-    const role = req.user?.role || "user";
-    const isOwnerUser   = Number(order.UserId)   === Number(req.user.id);
-    const vendorIdClaim = req.vendor?.id || req.user?.vendorId;
-    const isOwnerVendor = vendorIdClaim && Number(order.VendorId) === Number(vendorIdClaim);
-    const isAdmin       = role === "admin";
-
-    if (!(isOwnerUser || isOwnerVendor || isAdmin)) {
-      return res.status(403).json({ message: "Not authorized to track this order" });
-    }
-
-    return res.json({
-      id: order.id,
-      status: order.status,
-      paymentStatus: order.paymentStatus,
-      paymentMethod: order.paymentMethod,
-      totalAmount: order.totalAmount,
-      createdAt: order.createdAt,
-      paidAt: order.paidAt,
-      vendor: { id: order.Vendor?.id, name: order.Vendor?.name }
-    });
-  } catch (err) {
-    return res.status(500).json({ message: "Error fetching tracking info", error: err.message });
-  }
-}
-router.get("/:id/track", authenticateToken, handleTrack);
-router.get("/track/:id", authenticateToken, handleTrack);
-
-/* ----------------- create order (user) ----------------- */
-router.post("/", authenticateToken, async (req, res) => {
-  const t = await sequelize.transaction();
-  try {
-    const { VendorId, vendorId, items, paymentMethod = "mock_online", note, address } = req.body;
-    const idemKey = req.get("Idempotency-Key") || null;
-
-    const vendorIdNum = Number(VendorId || vendorId);
-    if (!Number.isFinite(vendorIdNum)) {
-      await t.rollback();
-      return res.status(400).json({ message: "VendorId must be a number", got: VendorId ?? vendorId });
-    }
-    if (!Array.isArray(items) || items.length === 0) {
-      await t.rollback();
-      return res.status(400).json({ message: "At least one item is required" });
-    }
-
-    // STEP 1: idempotency lookup (safe even if table missing)
-    if (idemKey) {
-      const existingKey = await safeFindIdempotencyKey(idemKey, req.user.id, t);
-      if (existingKey?.orderId) {
-        const existingOrder = await Order.findByPk(existingKey.orderId, {
-          include: [
-            { model: User, attributes: ["id", "name", "email"] },
-            { model: Vendor, attributes: ["id", "name", "cuisine"] },
-            { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
-          ],
-          transaction: t,
-        });
-        await t.commit();
-        return res.status(200).json({ message: "Order already created", order: existingOrder });
-      }
-    }
-
-    // Validate / normalize items
-    const ids = [];
-    const cleanItems = [];
-    for (const it of items) {
-      const mid = Number(it?.MenuItemId);
-      const qty = Math.max(1, Number(it?.quantity || 0));
-      if (!Number.isFinite(mid) || !Number.isFinite(qty)) {
-        await t.rollback();
-        return res.status(400).json({
-          message: "Each item must include numeric MenuItemId and quantity (>0)",
-          got: it,
-        });
-      }
-      ids.push(mid);
-      cleanItems.push({ MenuItemId: mid, quantity: qty });
-    }
-
-    // Load menu items to ensure all belong to this vendor + get prices
-    const menuRows = await MenuItem.findAll({
-      where: { id: ids, VendorId: vendorIdNum },
-      attributes: ["id", "price", "name", "VendorId"],
-      transaction: t,
-    });
-
-    const foundIds = menuRows.map((m) => Number(m.id));
-    if (menuRows.length !== ids.length) {
-      const missing = ids.filter((id) => !foundIds.includes(id));
-      await t.rollback();
-      return res.status(400).json({
-        message: "One or more items are invalid for this vendor (check menu item -> vendor mapping).",
-        vendorId: vendorIdNum,
-        requestedItemIds: ids,
-        foundForVendor: foundIds,
-        missingForVendor: missing,
-      });
-    }
-
-    const priceMap = new Map(menuRows.map((m) => [Number(m.id), Number(m.price) || 0]));
-    const computedTotal = cleanItems.reduce(
-      (sum, it) => sum + (priceMap.get(it.MenuItemId) || 0) * it.quantity,
-      0
-    );
-
-    // Create order
-    const order = await Order.create({
-      UserId: req.user.id,
-      VendorId: vendorIdNum,
-      totalAmount: computedTotal,
-      status: "pending",
-      paymentMethod,
-      paymentStatus: "unpaid",
-      note: note || null,
-      address: address || null,
-    }, { transaction: t });
-
-    // Create line items
-    await OrderItem.bulkCreate(
-      cleanItems.map((it) => ({
-        OrderId: order.id,
-        MenuItemId: it.MenuItemId,
-        quantity: it.quantity,
-      })),
-      { transaction: t }
-    );
-
-    // STEP 2: store idempotency key (safe if table missing)
-    if (idemKey) {
-      await safeCreateIdempotencyKey({ key: idemKey, userId: req.user.id, orderId: order.id }, t);
-    }
-
-    // Reload full order (with includes)
-    const fullOrder = await Order.findByPk(order.id, {
-      include: [
-        { model: User, attributes: ["id", "name", "email"] },
-        { model: Vendor, attributes: ["id", "name", "cuisine"] },
-        { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
-      ],
-      transaction: t,
-    });
-
-    await t.commit();
-
-    // Live updates
-    emitToVendorHelper(req, vendorIdNum, "order:new", fullOrder);
-    emitToUserHelper(req, req.user.id, "order:new", fullOrder);
-
-    return res.status(201).json({ message: "Order created", order: fullOrder });
-  } catch (err) {
-    try { await t.rollback(); } catch (_) {}
-    console.error("POST /api/orders error:", err?.name, err?.message);
-    if (err?.name === "SequelizeForeignKeyConstraintError") {
-      return res.status(400).json({
-        message: "Invalid foreign key (user/vendor/menu item mismatch). Check payload IDs.",
-        error: err.message,
-      });
-    }
-    if (err?.name === "SequelizeValidationError") {
-      return res.status(400).json({ message: "Validation failed", errors: err.errors });
-    }
-    return res.status(500).json({ message: "Error creating order", error: err.message });
-  }
-});
-
-/* ----------------- update (admin/legacy), delete ----------------- */
-router.put("/:id", authenticateToken, async (req, res) => {
-  const { id } = req.params;
-  const { totalAmount, items } = req.body;
-
-  try {
-    const order = await Order.findByPk(id);
-    if (!order) return res.status(404).json({ message: "Order not found" });
-
-    if (totalAmount !== undefined) order.totalAmount = totalAmount;
-    await order.save();
-
-    if (Array.isArray(items) && items.length) {
-      await OrderItem.destroy({ where: { OrderId: id } });
-      await OrderItem.bulkCreate(items.map((it) => ({
-        OrderId: id,
-        MenuItemId: it.MenuItemId,
-        quantity: it.quantity,
-      })));
-    }
-    res.json({ message: "Order updated successfully", order });
-  } catch (err) {
-    res.status(500).json({ message: "Error updating order", error: err.message });
-  }
-});
-
-// Vendor updates order status (accept / ready / delivered / rejected)
-router.patch(
-  "/:id/status",
-  authenticateToken,
-  requireVendor,
-  ensureVendorProfile,
-  async (req, res) => {
-    try {
-      const vendorId = req.vendor.id;
-      const { id } = req.params;
-      const { status } = req.body;
-
-      const allowed = ["pending", "accepted", "rejected", "ready", "delivered"];
-      if (!allowed.includes(status)) {
-        return res.status(400).json({ message: "Invalid status" });
-      }
-
-      const order = await Order.findByPk(id);
-      if (!order) return res.status(404).json({ message: "Order not found" });
-      if (order.VendorId !== vendorId) {
-        return res.status(403).json({ message: "Not your order" });
-      }
-
-      order.status = status;
-      await order.save();
-
-      // live in-app updates via sockets
-      emitToVendorHelper(req, order.VendorId, "order:status", { id: order.id, status: order.status });
-      emitToUserHelper(req, order.UserId, "order:status", { id: order.id, status: order.status, UserId: order.UserId });
-
-      // Optional push notification
-      try {
-        const title = `Order #${order.id} is ${order.status}`;
-        const body  = `Vendor updated your order to "${order.status}".`;
-        const url   = `/orders`;
-        await notifyUser(order.UserId, { title, body, url, tag: `order-${order.id}` });
-      } catch (e) {
-        console.warn("push notify failed:", e?.message);
-      }
-
-      return res.json({ message: "Status updated", order });
-    } catch (err) {
-      return res.status(500).json({ message: "Failed to update status", error: err.message });
-    }
-  }
-);
-
-router.delete("/:id", authenticateToken, async (req, res) => {
-  try {
-    const order = await Order.findByPk(req.params.id);
-    if (!order) return res.status(404).json({ message: "Order not found" });
-
-    await OrderItem.destroy({ where: { OrderId: order.id } });
-    await order.destroy();
-
-    res.json({ message: "Order deleted successfully" });
-  } catch (err) {
-    res.status(500).json({ message: "Error deleting order", error: err.message });
   }
 });
 
