@@ -1,11 +1,14 @@
 
-// index.js
 require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
 const http = require("http");
 const { Server } = require("socket.io");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
+const compression = require("compression");
+const morgan = require("morgan");
 
 // ---- DB ----
 const db = require("./models"); // includes sequelize instance
@@ -30,7 +33,9 @@ const FRONTENDS = (process.env.CORS_ORIGINS
 // Trust proxy (Render/Heroku/NGINX) so websocket upgrade works well
 app.set("trust proxy", 1);
 
-// ---- Middleware ----
+// ---- Security & Middleware ----
+
+// CORS allowlist
 app.use(
   cors({
     origin: (origin, cb) => {
@@ -41,11 +46,49 @@ app.use(
     },
     credentials: true,
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS",
-    allowedHeaders: "Content-Type, Authorization, X-Requested-With, Idempotency-Key",
+    allowedHeaders:
+      "Content-Type, Authorization, X-Requested-With, Idempotency-Key",
   })
 );
 
-app.use(express.json());
+// Security headers
+app.use(
+  helmet({
+    contentSecurityPolicy: false, // relax CSP for now, can tighten later
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
+
+// Gzip compression
+app.use(compression());
+
+// Logging
+app.use(morgan(process.env.NODE_ENV === "production" ? "tiny" : "dev"));
+
+// JSON body size guard
+app.use(express.json({ limit: "250kb" }));
+app.use(express.urlencoded({ extended: true, limit: "250kb" }));
+
+// Rate limits
+app.use(
+  "/api/",
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 800,
+    standardHeaders: true,
+    legacyHeaders: false,
+  })
+);
+app.use(
+  ["/api/auth/login", "/api/auth/register"],
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 50,
+    standardHeaders: true,
+    legacyHeaders: false,
+  })
+);
+
 // ---- HTTP server + Socket.IO ----
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -79,7 +122,6 @@ io.on("connection", (socket) => {
   socket.on("vendor:join", (vendorId) => vendorId && socket.join(`vendor:${vendorId}`));
   socket.on("user:join", (userId) => userId && socket.join(`user:${userId}`));
 
-  // Optional: if you emit auth refresh from the client
   socket.on("auth:refresh", () => {
     // no-op placeholder; add token checks here if needed
   });
@@ -92,7 +134,7 @@ io.on("connection", (socket) => {
 // ---- Routes (safe mounting) ----
 const { VAPID_PUBLIC_KEY } = require("./utils/push");
 
-// Required routes (these should exist)
+// Required routes
 const authRoutes = require("./routes/authRoutes");
 const vendorRoutes = require("./routes/vendorRoutes");
 const menuItemRoutes = require("./routes/menuItemRoutes");
@@ -100,17 +142,15 @@ const orderRoutes = require("./routes/orderRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 const pushRoutes = require("./routes/pushRoutes");
 
-// Optional route: paymentRoutes might not exist yet during first deploys
+// Optional route: paymentRoutes might not exist yet
 let paymentRoutes = null;
 try {
-  // If ./routes/paymentRoutes.js is missing, we'll skip mounting it gracefully
-  // eslint-disable-next-line import/no-unresolved, global-require
   paymentRoutes = require("./routes/paymentRoutes");
 } catch (e) {
   console.warn("⚠️  paymentRoutes not found — skipping /api/payments mount for now.");
 }
 
-// Helper to mount a plain router if it exists
+// Helpers to mount routers
 const mountSafe = (path, router) => {
   if (router && typeof router === "function") {
     app.use(path, router);
@@ -118,8 +158,6 @@ const mountSafe = (path, router) => {
     console.warn(`⚠️  Skipped mounting ${path} — handler not a function.`);
   }
 };
-
-// Helper to mount a router with emit helpers injected (orders/payments)
 const mountWithEmit = (path, router) => {
   if (router && typeof router === "function") {
     app.use(
@@ -144,12 +182,12 @@ mountWithEmit("/api/orders", orderRoutes);
 mountSafe("/api/push", pushRoutes);
 mountSafe("/api/admin", adminRoutes);
 
-// Mount optional payments, only if present
+// Mount optional payments
 if (paymentRoutes) {
   mountWithEmit("/api/payments", paymentRoutes);
 }
 
-// Public key endpoint used by the frontend
+// Public key endpoint
 app.get("/public-key", (_req, res) => {
   res.json({ publicKey: VAPID_PUBLIC_KEY || "" });
 });
@@ -160,6 +198,15 @@ app.get("/", (_req, res) => res.send("✅ Cloud Kitchen Backend is live!"));
 
 // 404 fallback
 app.use((req, res) => res.status(404).json({ message: "Route not found" }));
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error("Unhandled error:", err.message || err);
+  if (err.message === "Not allowed by CORS") {
+    return res.status(403).json({ message: "CORS blocked" });
+  }
+  res.status(500).json({ message: "Server error" });
+});
 
 // ---- Start ----
 const PORT = process.env.PORT || 5000;
@@ -185,7 +232,7 @@ db.sequelize
     process.exit(1);
   });
 
-// Optional graceful shutdown on Render
+// Graceful shutdown
 process.on("SIGTERM", () => {
   console.log("🛑 SIGTERM received, closing server...");
   server.close(() => {
