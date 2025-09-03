@@ -1,0 +1,148 @@
+
+{
+  "info": {
+    "name": "Servezy Backend API",
+    "_postman_id": "servezy-backend-tests",
+    "description": "Postman collection to test Servezy backend (auth, orders, vendor, admin, invoice).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base}}/ping"
+      }
+    },
+    {
+      "name": "Public Key",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base}}/public-key"
+      }
+    },
+    {
+      "name": "Auth - Login (User)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{base}}/api/auth/login",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"user@example.com\",\n  \"password\": \"password\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Auth - Login (Vendor)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{base}}/api/auth/login",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"vendor@example.com\",\n  \"password\": \"password\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Orders - My Orders",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": "{{base}}/api/orders/my?page=1&pageSize=10"
+      }
+    },
+    {
+      "name": "Orders - Create Order",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "postman-test-{{timestamp}}" }
+        ],
+        "url": "{{base}}/api/orders",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"VendorId\": 1,\n  \"items\": [{\"MenuItemId\": 1, \"quantity\": 2}],\n  \"paymentMethod\": \"mock_online\",\n  \"note\": \"no onions\",\n  \"address\": \"Chennai\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Orders - Get One",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": "{{base}}/api/orders/{{orderId}}"
+      }
+    },
+    {
+      "name": "Orders - Cancel (User)",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": "{{base}}/api/orders/{{orderId}}/cancel"
+      }
+    },
+    {
+      "name": "Vendor - Current Orders",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{vendorToken}}" }],
+        "url": "{{base}}/api/orders/vendor?page=1&pageSize=10"
+      }
+    },
+    {
+      "name": "Vendor - Summary",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{vendorToken}}" }],
+        "url": "{{base}}/api/orders/vendor/summary"
+      }
+    },
+    {
+      "name": "Vendor - Daily Trend",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{vendorToken}}" }],
+        "url": "{{base}}/api/orders/vendor/daily?days=14"
+      }
+    },
+    {
+      "name": "Vendor - Update Status",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{vendorToken}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": "{{base}}/api/orders/{{orderId}}/status",
+        "body": {
+          "mode": "raw",
+          "raw": "{ \"status\": \"accepted\" }"
+        }
+      }
+    },
+    {
+      "name": "Orders - Invoice",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": "{{base}}/api/orders/{{orderId}}/invoice"
+      }
+    }
+  ],
+  "variable": [
+    { "key": "base", "value": "https://cloud-kitchen-backend-p7gd.onrender.com" },
+    { "key": "token", "value": "" },
+    { "key": "vendorToken", "value": "" },
+    { "key": "orderId", "value": "" },
+    { "key": "timestamp", "value": "{{$timestamp}}" }
+  ]
+}
