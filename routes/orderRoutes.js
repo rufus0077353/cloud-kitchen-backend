@@ -292,6 +292,39 @@ router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
   }
 });
 
+
+// GET one order (user can see their own, vendor can see theirs, admin can see all)
+router.get("/:id", authenticateToken, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid order id" });
+
+    const order = await Order.findByPk(id, {
+      include: [
+        { model: User, attributes: ["id", "name", "email"] },
+        { model: Vendor, attributes: ["id", "name", "cuisine"] },
+        { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
+      ],
+    });
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    const role = req.user?.role || "user";
+    const isOwnerUser   = Number(order.UserId)   === Number(req.user.id);
+    const vendorIdClaim = req.vendor?.id || req.user?.vendorId;
+    const isOwnerVendor = vendorIdClaim && Number(order.VendorId) === Number(vendorIdClaim);
+    const isAdmin       = role === "admin";
+
+    if (!(isOwnerUser || isOwnerVendor || isAdmin)) {
+      return res.status(403).json({ message: "Not authorized to view this order" });
+    }
+
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching order", error: err.message });
+  }
+});
+
+
 /* ----------------- create order (user) ----------------- */
 router.post("/", authenticateToken, async (req, res) => {
   const t = await sequelize.transaction();
