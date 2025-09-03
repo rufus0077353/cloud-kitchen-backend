@@ -10,14 +10,10 @@ const {
   OrderItem,
   Vendor,
   MenuItem,
-  User
+  User,
 } = require("../models");
 
-const {
-  authenticateToken,
-  requireVendor
-} = require("../middleware/authMiddleware");
-
+const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 const sequelize = Order.sequelize;
 const { notifyUser } = require("../utils/notifications");
@@ -266,8 +262,8 @@ router.get(
         `
         SELECT
           to_char(date_trunc('day', "createdAt"), 'YYYY-MM-DD') AS date,
-          COUNT(*) FILTER (WHERE status NOT IN ('rejected','canceled'))                       AS orders,
-          COALESCE(SUM(CASE WHEN status NOT IN ('rejected','canceled') THEN "totalAmount" END), 0)  AS revenue
+          COUNT(*) FILTER (WHERE status NOT IN ('rejected','canceled'))                                               AS orders,
+          COALESCE(SUM(CASE WHEN status NOT IN ('rejected','canceled') THEN "totalAmount" END), 0)                    AS revenue
         FROM "orders"
         WHERE "VendorId" = :vendorId
           AND "createdAt" >= :startDate
@@ -318,7 +314,6 @@ router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
   }
 });
 
-
 // GET one order (user can see their own, vendor can see theirs, admin can see all)
 router.get("/:id", authenticateToken, async (req, res) => {
   try {
@@ -349,7 +344,6 @@ router.get("/:id", authenticateToken, async (req, res) => {
     res.status(500).json({ message: "Error fetching order", error: err.message });
   }
 });
-
 
 /* ----------------- create order (user) ----------------- */
 router.post("/", authenticateToken, async (req, res) => {
@@ -429,16 +423,19 @@ router.post("/", authenticateToken, async (req, res) => {
     );
 
     // Create order
-    const order = await Order.create({
-      UserId: req.user.id,
-      VendorId: vendorIdNum,
-      totalAmount: computedTotal,
-      status: "pending",
-      paymentMethod,
-      paymentStatus: "unpaid",
-      note: note || null,
-      address: address || null,
-    }, { transaction: t });
+    const order = await Order.create(
+      {
+        UserId: req.user.id,
+        VendorId: vendorIdNum,
+        totalAmount: computedTotal,
+        status: "pending",
+        paymentMethod,
+        paymentStatus: "unpaid",
+        note: note || null,
+        address: address || null,
+      },
+      { transaction: t }
+    );
 
     // Create line items
     await OrderItem.bulkCreate(
@@ -475,7 +472,7 @@ router.post("/", authenticateToken, async (req, res) => {
     await audit(req, {
       action: "ORDER_CREATED",
       order: fullOrder,
-      details: { items: cleanItems, totalAmount: computedTotal, paymentMethod }
+      details: { items: cleanItems, totalAmount: computedTotal, paymentMethod },
     });
 
     return res.status(201).json({ message: "Order created", order: fullOrder });
@@ -516,6 +513,9 @@ router.patch("/:id/cancel", authenticateToken, async (req, res) => {
     if (order.status !== "pending") {
       return res.status(400).json({ message: "Only pending orders can be canceled" });
     }
+    if (order.paymentStatus === "paid") {
+      return res.status(400).json({ message: "Paid orders cannot be canceled" });
+    }
 
     order.status = "canceled";
     await order.save();
@@ -538,7 +538,7 @@ router.patch("/:id/cancel", authenticateToken, async (req, res) => {
     await audit(req, {
       action: "ORDER_CANCELED",
       order,
-      details: { by: isOwnerUser ? "user" : "admin" }
+      details: { by: isOwnerUser ? "user" : "admin" },
     });
 
     return res.json({ message: "Order canceled", order });
@@ -547,7 +547,7 @@ router.patch("/:id/cancel", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- update (admin/legacy), delete, filter, invoice ----------------- */
+/* ----------------- update (admin/legacy), delete, filter ----------------- */
 router.put("/:id", authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { totalAmount, items } = req.body;
@@ -573,8 +573,7 @@ router.put("/:id", authenticateToken, async (req, res) => {
   }
 });
 
-// Vendor updates order status (accept / ready / delivered / rejected)
-// (Vendor **cannot** set "canceled" here)
+// Vendor updates order status (accept / ready / delivered / rejected) — not "canceled"
 router.patch(
   "/:id/status",
   authenticateToken,
@@ -618,7 +617,7 @@ router.patch(
       await audit(req, {
         action: "ORDER_STATUS_UPDATE",
         order,
-        details: { by: "vendor", newStatus: status }
+        details: { by: "vendor", newStatus: status },
       });
 
       return res.json({ message: "Status updated", order });
@@ -641,7 +640,7 @@ router.delete("/:id", authenticateToken, async (req, res) => {
     await audit(req, {
       action: "ORDER_DELETED",
       order,
-      details: { by: req.user?.role || "user" }
+      details: { by: req.user?.role || "user" },
     });
 
     res.json({ message: "Order deleted successfully" });
@@ -679,7 +678,72 @@ router.get("/filter", authenticateToken, async (req, res) => {
   }
 });
 
-// HTML invoice (download/print from UI)
+/* ----------------- payment status ----------------- */
+// Vendor/Admin marks payment status (e.g., COD delivered -> paid)
+router.patch(
+  "/:id/payment",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status } = req.body; // "paid" | "failed" | "unpaid"
+      const role = req.user?.role || "user";
+
+      const order = await Order.findByPk(id);
+      if (!order) return res.status(404).json({ message: "Order not found" });
+
+      // Only vendor who owns the order or admin can mark payments
+      const vendorIdClaim = req.vendor?.id || req.user?.vendorId;
+      const isOwnerVendor = vendorIdClaim && Number(order.VendorId) === Number(vendorIdClaim);
+      const isAdmin = role === "admin";
+      if (!(isOwnerVendor || isAdmin)) {
+        return res.status(403).json({ message: "Not authorized to update payment for this order" });
+      }
+
+      const allowed = ["paid", "failed", "unpaid"];
+      if (!allowed.includes(status)) {
+        return res.status(400).json({ message: "Invalid payment status" });
+      }
+
+      // Do not allow payment updates on canceled/rejected
+      if (["canceled", "rejected"].includes(order.status)) {
+        return res.status(400).json({ message: `Cannot set payment on a ${order.status} order` });
+      }
+
+      // Update
+      order.paymentStatus = status;
+      order.paidAt = status === "paid" ? new Date() : null;
+      await order.save();
+
+      // live updates
+      emitToVendorHelper(req, order.VendorId, "order:payment", { id: order.id, paymentStatus: order.paymentStatus, paidAt: order.paidAt });
+      emitToUserHelper(req, order.UserId, "order:payment", { id: order.id, paymentStatus: order.paymentStatus, paidAt: order.paidAt, UserId: order.UserId });
+
+      // push notify
+      try {
+        const title = `Payment ${status} for Order #${order.id}`;
+        const body  = status === "paid" ? "Thanks! Your payment is confirmed." : (status === "failed" ? "Payment failed. Please try again." : "Payment set to unpaid.");
+        const url   = `/orders`;
+        await notifyUser(order.UserId, { title, body, url, tag: `order-${order.id}` });
+      } catch (e) {
+        console.warn("push notify failed:", e?.message);
+      }
+
+      // Audit
+      await audit(req, {
+        action: "ORDER_PAYMENT_UPDATE",
+        order,
+        details: { by: isOwnerVendor ? "vendor" : "admin", paymentStatus: status },
+      });
+
+      return res.json({ message: "Payment status updated", order });
+    } catch (err) {
+      return res.status(500).json({ message: "Failed to update payment", error: err.message });
+    }
+  }
+);
+
+/* ----------------- HTML invoice (download/print from UI) ----------------- */
 router.get("/:id/invoice", authenticateToken, async (req, res) => {
   try {
     const order = await Order.findByPk(req.params.id, {
