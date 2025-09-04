@@ -707,71 +707,98 @@ router.get("/filter", authenticateToken, async (req, res) => {
   }
 });
 
+
 /* ----------------- payment status ----------------- */
 // Vendor/Admin marks payment status (e.g., COD delivered -> paid)
-router.patch(
-  "/:id/payment",
-  authenticateToken,
-  async (req, res) => {
-    try {
-      const { id } = req.params;
-      const { status } = req.body; // "paid" | "failed" | "unpaid"
-      const role = req.user?.role || "user";
+router.patch("/:id/payment", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    // accept either { status } or { paymentStatus }
+    const raw = (req.body?.paymentStatus ?? req.body?.status ?? "").toString().toLowerCase();
+    const status = raw || "unpaid";
 
-      const order = await Order.findByPk(id);
-      if (!order) return res.status(404).json({ message: "Order not found" });
-
-      // Only vendor who owns the order or admin can mark payments
-      const vendorIdClaim = req.vendor?.id || req.user?.vendorId;
-      const isOwnerVendor = vendorIdClaim && Number(order.VendorId) === Number(vendorIdClaim);
-      const isAdmin = role === "admin";
-      if (!(isOwnerVendor || isAdmin)) {
-        return res.status(403).json({ message: "Not authorized to update payment for this order" });
-      }
-
-      const allowed = ["paid", "failed", "unpaid"];
-      if (!allowed.includes(status)) {
-        return res.status(400).json({ message: "Invalid payment status" });
-      }
-
-      // Do not allow payment updates on canceled/rejected
-      if (["canceled", "rejected"].includes(order.status)) {
-        return res.status(400).json({ message: `Cannot set payment on a ${order.status} order` });
-      }
-
-      // Update
-      order.paymentStatus = status;
-      order.paidAt = status === "paid" ? new Date() : null;
-      await order.save();
-
-      // live updates
-      emitToVendorHelper(req, order.VendorId, "order:payment", { id: order.id, paymentStatus: order.paymentStatus, paidAt: order.paidAt });
-      emitToUserHelper(req, order.UserId, "order:payment", { id: order.id, paymentStatus: order.paymentStatus, paidAt: order.paidAt, UserId: order.UserId });
-
-      // push notify
-      try {
-        const title = `Payment ${status} for Order #${order.id}`;
-        const body  = status === "paid" ? "Thanks! Your payment is confirmed." : (status === "failed" ? "Payment failed. Please try again." : "Payment set to unpaid.");
-        const url   = `/orders`;
-        await notifyUser(order.UserId, { title, body, url, tag: `order-${order.id}` });
-      } catch (e) {
-        console.warn("push notify failed:", e?.message);
-      }
-
-      // Audit
-      await audit(req, {
-        action: "ORDER_PAYMENT_UPDATE",
-        order,
-        details: { by: isOwnerVendor ? "vendor" : "admin", paymentStatus: status },
-      });
-
-      return res.json({ message: "Payment status updated", order });
-    } catch (err) {
-      return res.status(500).json({ message: "Failed to update payment", error: err.message });
+    const allowed = ["paid", "failed", "unpaid"];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ message: "Invalid payment status" });
     }
-  }
-);
 
+    const order = await Order.findByPk(id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    const role = req.user?.role || "user";
+
+    // Figure out if this user is the vendor that owns the order
+    // Prefer req.vendor.id (if middleware filled it), else look up by UserId fallback
+    let vendorIdClaim = req.vendor?.id || req.user?.vendorId || null;
+    if (!vendorIdClaim && role === "vendor") {
+      // Fallback: find vendor profile for this user
+      try {
+        const v = await Vendor.findOne({ where: { UserId: req.user.id }, attributes: ["id"] });
+        if (v) vendorIdClaim = v.id;
+      } catch (_) {}
+    }
+    const isOwnerVendor =
+      vendorIdClaim && Number(order.VendorId) === Number(vendorIdClaim);
+    const isAdmin = role === "admin";
+
+    if (!(isOwnerVendor || isAdmin)) {
+      return res
+        .status(403)
+        .json({ message: "Not authorized to update payment for this order" });
+    }
+
+    // Do not allow payment updates on canceled/rejected
+    if (["canceled", "cancelled", "rejected"].includes((order.status || "").toLowerCase())) {
+      return res
+        .status(400)
+        .json({ message: `Cannot set payment on a ${order.status} order` });
+    }
+
+    // Update and persist
+    order.paymentStatus = status;
+    order.paidAt = status === "paid" ? new Date() : null;
+    await order.save();
+
+    // live updates
+    emitToVendorHelper(req, order.VendorId, "order:payment", {
+      id: order.id,
+      paymentStatus: order.paymentStatus,
+      paidAt: order.paidAt,
+    });
+    emitToUserHelper(req, order.UserId, "order:payment", {
+      id: order.id,
+      paymentStatus: order.paymentStatus,
+      paidAt: order.paidAt,
+      UserId: order.UserId,
+    });
+
+    // push notify
+    try {
+      const title = `Payment ${status} for Order #${order.id}`;
+      const body =
+        status === "paid"
+          ? "Thanks! Your payment is confirmed."
+          : status === "failed"
+          ? "Payment failed. Please try again."
+          : "Payment set to unpaid.";
+      const url = `/orders`;
+      await notifyUser(order.UserId, { title, body, url, tag: `order-${order.id}` });
+    } catch (e) {
+      console.warn("push notify failed:", e?.message);
+    }
+
+    // Audit
+    await audit(req, {
+      action: "ORDER_PAYMENT_UPDATE",
+      order,
+      details: { by: isOwnerVendor ? "vendor" : "admin", paymentStatus: status },
+    });
+
+    return res.json({ message: "Payment status updated", order });
+  } catch (err) {
+    return res.status(500).json({ message: "Failed to update payment", error: err.message });
+  }
+});
 /* ----------------- invoice helpers + routes ----------------- */
 async function buildInvoiceHtml(order) {
   const escapeHtml = (s = "") =>
