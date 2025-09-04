@@ -1,4 +1,3 @@
-// routes/adminRoutes.js
 const express = require("express");
 const router = express.Router();
 const bcrypt = require("bcrypt");
@@ -6,7 +5,35 @@ const { User, Vendor, Order, MenuItem } = require("../models");
 const { authenticateToken, requireAdmin } = require("../middleware/authMiddleware");
 const { Op, Sequelize } = require("sequelize");
 
-// Overview
+/* ----------------- helpers ----------------- */
+function normalizeOrderFilters(req) {
+  // accept from either query (GET) or body (POST)
+  const src = req.method === "GET" ? req.query : (req.body || {});
+  // accept both lower & UPPER case keys
+  const val = (a, b) => (src[a] ?? src[b] ?? "").toString().trim();
+
+  const UserId   = val("UserId",   "userId");
+  const VendorId = val("VendorId", "vendorId");
+  const status   = val("status",   "Status");
+
+  // date keys accepted: startDate/endDate OR From/To
+  const startRaw = val("startDate", "From");
+  const endRaw   = val("endDate",   "To");
+
+  const where = {};
+  if (UserId)   where.UserId   = Number(UserId);
+  if (VendorId) where.VendorId = Number(VendorId);
+  if (status)   where.status   = status;
+
+  if (startRaw || endRaw) {
+    where.createdAt = {};
+    if (startRaw) where.createdAt[Op.gte] = new Date(startRaw);
+    if (endRaw)   where.createdAt[Op.lte] = new Date(endRaw);
+  }
+  return where;
+}
+
+/* ----------------- overview ----------------- */
 router.get("/overview", authenticateToken, requireAdmin, async (_req, res) => {
   try {
     const totalUsers   = await User.count();
@@ -19,7 +46,7 @@ router.get("/overview", authenticateToken, requireAdmin, async (_req, res) => {
   }
 });
 
-// Users
+/* ----------------- users ----------------- */
 router.get("/users", authenticateToken, requireAdmin, async (_req, res) => {
   try {
     const users = await User.findAll({ attributes: ["id", "name", "email", "role"] });
@@ -30,9 +57,10 @@ router.get("/users", authenticateToken, requireAdmin, async (_req, res) => {
 });
 
 router.post("/users", authenticateToken, requireAdmin, async (req, res) => {
-  const { name, email, password, role } = req.body;
-  if (!name || !email || !password || !role) return res.status(400).json({ message: "All fields are required" });
-
+  const { name, email, password, role } = req.body || {};
+  if (!name || !email || !password || !role) {
+    return res.status(400).json({ message: "All fields are required" });
+  }
   try {
     const exists = await User.findOne({ where: { email } });
     if (exists) return res.status(409).json({ message: "Email already in use" });
@@ -46,17 +74,14 @@ router.post("/users", authenticateToken, requireAdmin, async (req, res) => {
 
 router.put("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const { name, email, password, role } = req.body;
+    const { name, email, password, role } = req.body || {};
     const user = await User.findByPk(req.params.id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
     user.name = name || user.name;
     user.email = email || user.email;
     user.role = role || user.role;
-
-    if (password) {
-      user.password = await bcrypt.hash(password, 10);
-    }
+    if (password) user.password = await bcrypt.hash(password, 10);
 
     await user.save();
     res.json({ message: "User updated successfully", user });
@@ -77,7 +102,7 @@ router.delete("/users/:id", authenticateToken, requireAdmin, async (req, res) =>
   }
 });
 
-// Promote user to vendor
+/* ----------------- promote ----------------- */
 router.put("/promote/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const user = await User.findByPk(req.params.id);
@@ -92,7 +117,7 @@ router.put("/promote/:id", authenticateToken, requireAdmin, async (req, res) => 
   }
 });
 
-// Vendors
+/* ----------------- vendors ----------------- */
 router.get("/vendors", authenticateToken, requireAdmin, async (_req, res) => {
   try {
     const vendors = await Vendor.findAll();
@@ -103,7 +128,7 @@ router.get("/vendors", authenticateToken, requireAdmin, async (_req, res) => {
 });
 
 router.post("/vendors", authenticateToken, requireAdmin, async (req, res) => {
-  const { name, cuisine } = req.body;
+  const { name, cuisine } = req.body || {};
   if (!name || !cuisine) return res.status(400).json({ message: "Name and cuisine are required" });
 
   try {
@@ -119,7 +144,7 @@ router.put("/vendors/:id", authenticateToken, requireAdmin, async (req, res) => 
     const vendor = await Vendor.findByPk(req.params.id);
     if (!vendor) return res.status(404).json({ message: "Vendor not found" });
 
-    const { name, cuisine } = req.body;
+    const { name, cuisine } = req.body || {};
     vendor.name = name || vendor.name;
     vendor.cuisine = cuisine || vendor.cuisine;
 
@@ -142,24 +167,16 @@ router.delete("/vendors/:id", authenticateToken, requireAdmin, async (req, res) 
   }
 });
 
-// Orders (admin filters)
+/* ----------------- orders (admin filters) ----------------- */
+// GET variant (primary)
 router.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
-  const { UserId, VendorId, status, startDate, endDate } = req.query;
-  const where = {};
-  if (UserId) where.UserId = UserId;
-  if (VendorId) where.VendorId = VendorId;
-  if (status) where.status = status;
-  if (startDate || endDate) {
-    where.createdAt = {};
-    if (startDate) where.createdAt[Op.gte] = new Date(startDate);
-    if (endDate) where.createdAt[Op.lte] = new Date(endDate);
-  }
   try {
+    const where = normalizeOrderFilters(req);
     const orders = await Order.findAll({
       where,
       include: [
-        { model: User, attributes: ["id", "name", "email"] },
-        { model: Vendor, attributes: ["id", "name", "cuisine"] },
+        { model: User,   attributes: ["id", "name", "email"] },
+        { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
         { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
       ],
       order: [["createdAt", "DESC"]],
@@ -170,28 +187,45 @@ router.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
+// POST alias to help older/frontends that send JSON instead of querystring
+router.post("/orders", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const where = normalizeOrderFilters(req);
+    const orders = await Order.findAll({
+      where,
+      include: [
+        { model: User,   attributes: ["id", "name", "email"] },
+        { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
+        { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
+      ],
+      order: [["createdAt", "DESC"]],
+    });
+    res.json(orders);
+  } catch (err) {
+    res.status(500).json({ message: "Orders fetch failed", error: err.message });
+  }
+});
+
+/* ----------------- insights ----------------- */
 router.get("/insights", authenticateToken, requireAdmin, async (_req, res) => {
   try {
     const recentOrders = await Order.findAll({
       attributes: [
         [Sequelize.fn("DATE", Sequelize.col("createdAt")), "date"],
         [Sequelize.fn("COUNT", Sequelize.col("id")), "orderCount"],
-        [Sequelize.fn("SUM", Sequelize.col("totalAmount")), "totalRevenue"]
+        [Sequelize.fn("SUM", Sequelize.col("totalAmount")), "totalRevenue"],
       ],
       group: [Sequelize.fn("DATE", Sequelize.col("createdAt"))],
       order: [[Sequelize.fn("DATE", Sequelize.col("createdAt")), "DESC"]],
-      limit: 7
+      limit: 7,
     });
 
     const topItems = await MenuItem.findAll({
-      attributes: [
-        "id", "name",
-        [Sequelize.fn("SUM", Sequelize.col("OrderItem.quantity")), "totalSold"]
-      ],
+      attributes: ["id", "name", [Sequelize.fn("SUM", Sequelize.col("OrderItem.quantity")), "totalSold"]],
       include: [{ model: Order, attributes: [], through: { attributes: ["quantity"] } }],
       group: ["MenuItem.id"],
       order: [[Sequelize.literal("totalSold"), "DESC"]],
-      limit: 5
+      limit: 5,
     });
 
     res.json({ recentOrders, topItems });
