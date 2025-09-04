@@ -1,3 +1,4 @@
+
 // backend/routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
@@ -17,6 +18,10 @@ const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 const sequelize = Order.sequelize;
 const { notifyUser } = require("../utils/notifications");
 
+/* ---------- config / optional deps ---------- */
+const COMMISSION_PCT = Number(process.env.COMMISSION_PCT || 0.15);
+let Puppeteer = null; try { Puppeteer = require("puppeteer"); } catch {}
+
 /* ----------------- socket helpers ----------------- */
 function emitToVendorHelper(req, vendorId, event, payload) {
   const fn = req.emitToVendor || req.app.get("emitToVendor");
@@ -28,7 +33,6 @@ function emitToUserHelper(req, userId, event, payload) {
 }
 
 /* ----------------- safe inline audit logger ----------------- */
-/** Writes to AuditLog if model exists; otherwise no-ops. */
 async function audit(req, { action, order = null, details = {} }) {
   try {
     const { AuditLog } = require("../models");
@@ -44,7 +48,6 @@ async function audit(req, { action, order = null, details = {} }) {
       },
     });
   } catch (e) {
-    // Never interrupt request flow because of logging
     console.warn("AuditLog skipped:", e?.message || e);
   }
 }
@@ -261,8 +264,8 @@ router.get(
         `
         SELECT
           to_char(date_trunc('day', "createdAt"), 'YYYY-MM-DD') AS date,
-          COUNT(*) FILTER (WHERE status NOT IN ('rejected','canceled'))                                        AS orders,
-          COALESCE(SUM(CASE WHEN status NOT IN ('rejected','canceled') THEN "totalAmount" END), 0)             AS revenue
+          COUNT(*) FILTER (WHERE status NOT IN ('rejected','canceled'))                                     AS orders,
+          COALESCE(SUM(CASE WHEN status NOT IN ('rejected','canceled') THEN "totalAmount" END), 0)           AS revenue
         FROM "orders"
         WHERE "VendorId" = :vendorId
           AND "createdAt" >= :startDate
@@ -480,6 +483,17 @@ router.post("/", authenticateToken, async (req, res) => {
       const payPayload = { id: fullOrder.id, paymentStatus: fullOrder.paymentStatus, paidAt: fullOrder.paidAt };
       emitToVendorHelper(req, vendorIdNum, "order:payment", payPayload);
       emitToUserHelper(req, req.user.id, "order:payment", { ...payPayload, UserId: req.user.id });
+      // push notify
+      try {
+        await notifyUser(req.user.id, {
+          title: `Payment confirmed for Order #${fullOrder.id}`,
+          body: "Thanks! Your payment is confirmed.",
+          url: `/orders`,
+          tag: `order-${fullOrder.id}`,
+        });
+      } catch (e) {
+        console.warn("push notify failed:", e?.message);
+      }
     }
     /* >>> END EMIT <<< */
 
@@ -519,7 +533,6 @@ router.patch("/:id/cancel", authenticateToken, async (req, res) => {
     if (!order) return res.status(404).json({ message: "Order not found" });
 
     const role = req.user?.role || "user";
-    the_isOwnerUser = Number(order.UserId) === Number(req.user.id);
     const isOwnerUser = Number(order.UserId) === Number(req.user.id);
     const isAdmin = role === "admin";
     if (!(isOwnerUser || isAdmin)) {
@@ -759,56 +772,41 @@ router.patch(
   }
 );
 
-/* ----------------- HTML invoice (download/print from UI) ----------------- */
-router.get("/:id/invoice", authenticateToken, async (req, res) => {
-  try {
-    const order = await Order.findByPk(req.params.id, {
-      include: [
-        { model: User, attributes: ["name", "email"] },
-        { model: Vendor, attributes: ["name", "cuisine"] },
-        { model: MenuItem, attributes: ["name", "price"], through: { attributes: ["quantity"] } },
-      ],
-    });
-    if (!order) return res.status(404).json({ message: "Order not found" });
+/* ----------------- invoice helpers + routes ----------------- */
+async function buildInvoiceHtml(order) {
+  const escapeHtml = (s = "") =>
+    String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
 
-    const escapeHtml = (s = "") =>
-      String(s)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
+  const fmtINR = (n) => `₹${Number(n || 0).toFixed(2)}`;
+  const LOGO = process.env.INVOICE_LOGO_URL || "";
 
-    const fmtINR = (n) => `₹${Number(n || 0).toFixed(2)}`;
+  // Support both OrderItems include and MenuItems include
+  const items = Array.isArray(order.MenuItems) && order.MenuItems.length
+    ? order.MenuItems.map(mi => ({ name: mi.name, price: mi.price, qty: mi?.OrderItem?.quantity || 1 }))
+    : Array.isArray(order.OrderItems) && order.OrderItems.length
+    ? order.OrderItems.map(oi => ({ name: oi.MenuItem?.name || "Item", price: oi.MenuItem?.price, qty: oi.quantity || oi?.OrderItem?.quantity || 1 }))
+    : [];
 
-    const items = Array.isArray(order.MenuItems) ? order.MenuItems : [];
-    const rowsHtml = items
-      .map((item) => {
-        const qty = Number(item?.OrderItem?.quantity || 1);
-        const price = Number(item?.price || 0);
-        const lineTotal = price * qty;
-        return `
-          <tr>
-            <td>${escapeHtml(item.name)}</td>
-            <td class="right">${qty}</td>
-            <td class="right">${fmtINR(price)}</td>
-            <td class="right">${fmtINR(lineTotal)}</td>
-          </tr>`;
-      })
-      .join("");
+  const rowsHtml = items.map(it => `
+    <tr>
+      <td>${escapeHtml(it.name)}</td>
+      <td class="right">${Number(it.qty || 1)}</td>
+      <td class="right">${fmtINR(it.price || 0)}</td>
+      <td class="right">${fmtINR((Number(it.price || 0) * Number(it.qty || 1)))}</td>
+    </tr>`).join("");
 
-    const computedSubTotal = items.reduce(
-      (sum, item) => sum + Number(item?.price || 0) * Number(item?.OrderItem?.quantity || 1),
-      0
-    );
+  const computedSubTotal = items.reduce((sum, it) => sum + Number(it.price || 0) * Number(it.qty || 1), 0);
+  const paymentMethod = order.paymentMethod === "mock_online" ? "Online (Mock)" : (order.paymentMethod || "COD");
+  const paymentStatus = order.paymentStatus || "unpaid";
+  const paidAt = order.paidAt ? new Date(order.paidAt).toLocaleString("en-IN") : "";
+  const createdAt = order.createdAt ? new Date(order.createdAt).toLocaleString("en-IN") : "-";
 
-    const LOGO = process.env.INVOICE_LOGO_URL || "";
-    const paymentMethod = order.paymentMethod === "mock_online" ? "Online (Mock)" : (order.paymentMethod || "COD");
-    const paymentStatus = order.paymentStatus || "unpaid";
-    const paidAt = order.paidAt ? new Date(order.paidAt).toLocaleString("en-IN") : "";
-    const createdAt = order.createdAt ? new Date(order.createdAt).toLocaleString("en-IN") : "-";
-
-    const html = `<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
@@ -909,11 +907,199 @@ router.get("/:id/invoice", authenticateToken, async (req, res) => {
   </div>
 </body>
 </html>`;
+}
 
+/* ----------------- HTML invoice (download/print from UI) ----------------- */
+router.get("/:id/invoice", authenticateToken, async (req, res) => {
+  try {
+    const order = await Order.findByPk(req.params.id, {
+      include: [
+        { model: User,   attributes: ["name", "email"] },
+        { model: Vendor, attributes: ["name", "cuisine"] },
+        // include both shapes for safety
+        { model: MenuItem, attributes: ["name", "price"], through: { attributes: ["quantity"] } },
+        { model: OrderItem, include: [{ model: MenuItem, attributes: ["name", "price"] }] },
+      ],
+    });
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    const html = await buildInvoiceHtml(order);
     res.set("Content-Type", "text/html; charset=utf-8");
     return res.send(html);
   } catch (err) {
     return res.status(500).json({ message: "Error generating invoice", error: err.message });
+  }
+});
+
+/* ----------------- PDF invoice (optional puppeteer) ----------------- */
+router.get("/:id/invoice.pdf", authenticateToken, async (req, res) => {
+  if (!Puppeteer) {
+    return res.status(501).json({ message: "PDF generation not enabled. Install 'puppeteer'." });
+  }
+  try {
+    const order = await Order.findByPk(req.params.id, {
+      include: [
+        { model: User,   attributes: ["name", "email"] },
+        { model: Vendor, attributes: ["name", "cuisine"] },
+        { model: MenuItem, attributes: ["name", "price"], through: { attributes: ["quantity"] } },
+        { model: OrderItem, include: [{ model: MenuItem, attributes: ["name", "price"] }] },
+      ],
+    });
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    const html = await buildInvoiceHtml(order);
+
+    const browser = await Puppeteer.launch({ args: ["--no-sandbox", "--disable-setuid-sandbox"] });
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: "networkidle0" });
+    const pdf = await page.pdf({
+      format: "A4",
+      printBackground: true,
+      margin: { top: "14mm", right: "14mm", bottom: "14mm", left: "14mm" },
+    });
+    await browser.close();
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="invoice-${order.id}.pdf"`);
+    return res.send(pdf);
+  } catch (err) {
+    return res.status(500).json({ message: "Error generating PDF", error: err.message });
+  }
+});
+
+/* ----------------- VENDOR PAYOUTS SUMMARY ----------------- */
+router.get(
+  "/payouts/summary",
+  authenticateToken,
+  requireVendor,
+  ensureVendorProfile,
+  async (req, res) => {
+    try {
+      const vendorId = req.vendor.id;
+      const { from, to } = req.query;
+      const where = {
+        VendorId: vendorId,
+        status: { [Op.notIn]: ["rejected", "canceled"] },
+      };
+      if (from || to) {
+        where.createdAt = {};
+        if (from) where.createdAt[Op.gte] = new Date(from);
+        if (to)   where.createdAt[Op.lte] = new Date(to);
+      }
+
+      const grossPaid = await Order.sum("totalAmount", { where: { ...where, paymentStatus: "paid" } }) || 0;
+      const paidOrders = await Order.count({ where: { ...where, paymentStatus: "paid" } });
+      const unpaidGross = await Order.sum("totalAmount", { where: { ...where, paymentStatus: { [Op.ne]: "paid" } } }) || 0;
+
+      const commission = +(grossPaid * COMMISSION_PCT).toFixed(2);
+      const netOwed    = +(grossPaid - commission).toFixed(2);
+
+      return res.json({
+        vendorId,
+        dateRange: { from: from || null, to: to || null },
+        rate: COMMISSION_PCT,
+        paidOrders,
+        grossPaid: +grossPaid.toFixed(2),
+        commission,
+        netOwed,
+        grossUnpaid: +unpaidGross.toFixed(2),
+      });
+    } catch (err) {
+      return res.status(500).json({ message: "Failed to build payouts summary", error: err.message });
+    }
+  }
+);
+
+/* ----------------- ADMIN: all vendor summaries ----------------- */
+router.get("/payouts/summary/all", authenticateToken, async (req, res) => {
+  try {
+    if (req.user?.role !== "admin") return res.status(403).json({ message: "Admin only" });
+    const { from, to } = req.query;
+    const where = {
+      status: { [Op.notIn]: ["rejected", "canceled"] },
+      paymentStatus: "paid",
+    };
+    if (from || to) {
+      where.createdAt = {};
+      if (from) where.createdAt[Op.gte] = new Date(from);
+      if (to)   where.createdAt[Op.lte] = new Date(to);
+    }
+
+    const rows = await Order.findAll({
+      attributes: [
+        "VendorId",
+        [sequelize.fn("COUNT", sequelize.col("Order.id")), "paidOrders"],
+        [sequelize.fn("SUM", sequelize.col("totalAmount")), "grossPaid"],
+      ],
+      where,
+      include: [{ model: Vendor, attributes: ["id", "name"] }],
+      group: ["VendorId", "Vendor.id"],
+      order: [[sequelize.fn("SUM", sequelize.col("totalAmount")), "DESC"]],
+    });
+
+    const out = rows.map(r => {
+      const grossPaid = Number(r.get("grossPaid") || 0);
+      const paidOrders = Number(r.get("paidOrders") || 0);
+      const commission = +(grossPaid * COMMISSION_PCT).toFixed(2);
+      const netOwed = +(grossPaid - commission).toFixed(2);
+      return {
+        vendorId: r.VendorId,
+        vendorName: r.Vendor?.name || "-",
+        paidOrders,
+        grossPaid: +grossPaid.toFixed(2),
+        commission,
+        netOwed,
+        rate: COMMISSION_PCT,
+      };
+    });
+
+    return res.json(out);
+  } catch (err) {
+    return res.status(500).json({ message: "Failed to build admin payouts", error: err.message });
+  }
+});
+
+/* ----------------- ADMIN: orders list with commission ----------------- */
+router.get("/admin", authenticateToken, async (req, res) => {
+  try {
+    if (req.user?.role !== "admin") return res.status(403).json({ message: "Admin only" });
+
+    const { page = 1, pageSize = 20, status, paymentStatus, vendorId, userId } = req.query;
+    const p = Math.max(1, Number(page) || 1);
+    const ps = Math.min(100, Math.max(1, Number(pageSize) || 20));
+
+    const where = {};
+    if (status)        where.status = status;
+    if (paymentStatus) where.paymentStatus = paymentStatus;
+    if (vendorId)      where.VendorId = Number(vendorId);
+    if (userId)        where.UserId = Number(userId);
+
+    const { count, rows } = await Order.findAndCountAll({
+      where,
+      include: [
+        { model: Vendor, attributes: ["id", "name"] },
+        { model: User,   attributes: ["id", "name", "email"] },
+      ],
+      order: [["createdAt", "DESC"]],
+      limit: ps,
+      offset: (p - 1) * ps,
+    });
+
+    const items = rows.map(o => ({
+      ...o.toJSON(),
+      commissionAmount: +(Number(o.totalAmount || 0) * COMMISSION_PCT).toFixed(2),
+      commissionRate: COMMISSION_PCT,
+    }));
+
+    return res.json({
+      items,
+      total: count,
+      page: p,
+      pageSize: ps,
+      totalPages: Math.ceil(count / ps),
+    });
+  } catch (err) {
+    return res.status(500).json({ message: "Failed to fetch admin orders", error: err.message });
   }
 });
 
