@@ -1,4 +1,3 @@
-
 // backend/routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
@@ -262,8 +261,8 @@ router.get(
         `
         SELECT
           to_char(date_trunc('day', "createdAt"), 'YYYY-MM-DD') AS date,
-          COUNT(*) FILTER (WHERE status NOT IN ('rejected','canceled'))                                               AS orders,
-          COALESCE(SUM(CASE WHEN status NOT IN ('rejected','canceled') THEN "totalAmount" END), 0)                    AS revenue
+          COUNT(*) FILTER (WHERE status NOT IN ('rejected','canceled'))                                        AS orders,
+          COALESCE(SUM(CASE WHEN status NOT IN ('rejected','canceled') THEN "totalAmount" END), 0)             AS revenue
         FROM "orders"
         WHERE "VendorId" = :vendorId
           AND "createdAt" >= :startDate
@@ -447,6 +446,14 @@ router.post("/", authenticateToken, async (req, res) => {
       { transaction: t }
     );
 
+    /* >>> AUTO-PAY FOR MOCK ONLINE <<< */
+    if (paymentMethod === "mock_online") {
+      order.paymentStatus = "paid";
+      order.paidAt = new Date();
+      await order.save({ transaction: t });
+    }
+    /* >>> END AUTO-PAY <<< */
+
     // STEP 2: store idempotency key (safe if table missing)
     if (idemKey) {
       await safeCreateIdempotencyKey({ key: idemKey, userId: req.user.id, orderId: order.id }, t);
@@ -467,6 +474,14 @@ router.post("/", authenticateToken, async (req, res) => {
     // Live updates
     emitToVendorHelper(req, vendorIdNum, "order:new", fullOrder);
     emitToUserHelper(req, req.user.id, "order:new", fullOrder);
+
+    /* >>> EMIT PAYMENT EVENT IF PAID <<< */
+    if (fullOrder.paymentStatus === "paid") {
+      const payPayload = { id: fullOrder.id, paymentStatus: fullOrder.paymentStatus, paidAt: fullOrder.paidAt };
+      emitToVendorHelper(req, vendorIdNum, "order:payment", payPayload);
+      emitToUserHelper(req, req.user.id, "order:payment", { ...payPayload, UserId: req.user.id });
+    }
+    /* >>> END EMIT <<< */
 
     // Audit
     await audit(req, {
@@ -504,6 +519,7 @@ router.patch("/:id/cancel", authenticateToken, async (req, res) => {
     if (!order) return res.status(404).json({ message: "Order not found" });
 
     const role = req.user?.role || "user";
+    the_isOwnerUser = Number(order.UserId) === Number(req.user.id);
     const isOwnerUser = Number(order.UserId) === Number(req.user.id);
     const isAdmin = role === "admin";
     if (!(isOwnerUser || isAdmin)) {
