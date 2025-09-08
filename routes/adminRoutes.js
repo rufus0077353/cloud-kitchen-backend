@@ -168,10 +168,41 @@ router.delete("/vendors/:id", authenticateToken, requireAdmin, async (req, res) 
 });
 
 /* ----------------- orders (admin filters) ----------------- */
-// GET variant (primary)
+
+// Orders (admin filters)
 router.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const where = normalizeOrderFilters(req);
+    // accept both lower/upper case from FE
+    const q = req.query || {};
+    const UserId   = q.UserId ?? q.userId ?? undefined;
+    const VendorId = q.VendorId ?? q.vendorId ?? undefined;
+    const status   = q.status ?? undefined;
+    const start    = q.startDate ?? q.from ?? undefined;
+    const end      = q.endDate   ?? q.to   ?? undefined;
+
+    const where = {};
+    if (UserId)   where.UserId = UserId;
+    if (VendorId) where.VendorId = VendorId;
+    if (status)   where.status = status;
+
+    // date filters (ignore invalid)
+    if (start || end) {
+      const createdAt = {};
+      if (start) {
+        const d = new Date(start);
+        if (!isNaN(d)) createdAt[Op.gte] = d;
+      }
+      if (end) {
+        // include full end day
+        const d = new Date(end);
+        if (!isNaN(d)) {
+          d.setHours(23, 59, 59, 999);
+          createdAt[Op.lte] = d;
+        }
+      }
+      if (Object.keys(createdAt).length) where.createdAt = createdAt;
+    }
+
     const orders = await Order.findAll({
       where,
       include: [
@@ -181,12 +212,13 @@ router.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
       ],
       order: [["createdAt", "DESC"]],
     });
-    res.json(orders);
+
+    return res.json(Array.isArray(orders) ? orders : []);
   } catch (err) {
-    res.status(500).json({ message: "Orders fetch failed", error: err.message });
+    console.error("ADMIN /orders failed:", err);
+    return res.status(500).json({ message: "Orders fetch failed", error: err.message });
   }
 });
-
 // POST alias to help older/frontends that send JSON instead of querystring
 router.post("/orders", authenticateToken, requireAdmin, async (req, res) => {
   try {
