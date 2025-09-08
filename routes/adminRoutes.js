@@ -172,50 +172,29 @@ router.delete("/vendors/:id", authenticateToken, requireAdmin, async (req, res) 
 // Orders (admin filters)
 router.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    // accept both lower/upper case from FE
     const q = req.query || {};
-    const UserId   = q.UserId ?? q.userId ?? undefined;
-    const VendorId = q.VendorId ?? q.vendorId ?? undefined;
-    const status   = q.status ?? undefined;
-    const start    = q.startDate ?? q.from ?? undefined;
-    const end      = q.endDate   ?? q.to   ?? undefined;
-
     const where = {};
-    if (UserId)   where.UserId = UserId;
-    if (VendorId) where.VendorId = VendorId;
-    if (status)   where.status = status;
-
-    // date filters (ignore invalid)
-    if (start || end) {
-      const createdAt = {};
-      if (start) {
-        const d = new Date(start);
-        if (!isNaN(d)) createdAt[Op.gte] = d;
-      }
-      if (end) {
-        // include full end day
-        const d = new Date(end);
-        if (!isNaN(d)) {
-          d.setHours(23, 59, 59, 999);
-          createdAt[Op.lte] = d;
-        }
-      }
-      if (Object.keys(createdAt).length) where.createdAt = createdAt;
-    }
+    if (q.UserId)   where.UserId   = q.UserId;
+    if (q.VendorId) where.VendorId = q.VendorId;
+    if (q.status)   where.status   = q.status;
 
     const orders = await Order.findAll({
       where,
       include: [
-        { model: User,   attributes: ["id", "name", "email"] },
+        { model: User, attributes: ["id", "name", "email"] },
         { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
-        { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
+        {
+          model: MenuItem,
+          attributes: ["id", "name", "price"],
+          through: { attributes: ["quantity"] },
+        },
       ],
       order: [["createdAt", "DESC"]],
     });
 
-    return res.json(Array.isArray(orders) ? orders : []);
+    return res.json(orders);
   } catch (err) {
-    console.error("ADMIN /orders failed:", err);
+    console.error("ADMIN /orders failed:", err); // 👈 log full error
     return res.status(500).json({ message: "Orders fetch failed", error: err.message });
   }
 });
