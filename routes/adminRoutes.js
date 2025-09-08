@@ -5,6 +5,8 @@ const { User, Vendor, Order, MenuItem } = require("../models");
 const { authenticateToken, requireAdmin } = require("../middleware/authMiddleware");
 const { Op, Sequelize } = require("sequelize");
 
+const DEFAULT_PLATFORM_RATE = Number(process.env.PLATFORM_RATE || 0.15) // 15%
+
 /* ----------------- helpers ----------------- */
 function normalizeOrderFilters(req) {
   // accept from either query (GET) or body (POST)
@@ -34,18 +36,60 @@ function normalizeOrderFilters(req) {
 }
 
 /* ----------------- overview ----------------- */
+
+// Overview (adds totalCommission + monthCommission)
 router.get("/overview", authenticateToken, requireAdmin, async (_req, res) => {
   try {
-    const totalUsers   = await User.count();
-    const totalVendors = await Vendor.count();
-    const totalOrders  = await Order.count();
-    const totalRevenue = await Order.sum("totalAmount");
-    res.json({ totalUsers, totalVendors, totalOrders, totalRevenue });
+    const totalUsers    = await User.count();
+    const totalVendors  = await Vendor.count();
+    const totalOrders   = await Order.count();
+    const totalRevenue  = await Order.sum("totalAmount");
+
+    // Only paid & not canceled/rejected count towards commission
+    const paidWhere = {
+      paymentStatus: "paid",
+      status: { [Op.notIn]: ["rejected", "canceled", "cancelled"] },
+    };
+
+    // Lifetime commission: compute in JS so we can safely fall back to DEFAULT_PLATFORM_RATE
+    const paidOrders = await Order.findAll({
+      where: paidWhere,
+      include: [{ model: Vendor, attributes: ["id", "commissionRate"] }],
+      attributes: ["id", "totalAmount", "VendorId", "createdAt"],
+    });
+
+    const sumCommission = (orders) =>
+      orders.reduce((sum, o) => {
+        const vRate =
+          o?.Vendor?.commissionRate != null
+            ? Number(o.Vendor.commissionRate)
+            : DEFAULT_PLATFORM_RATE;
+        const total = Number(o.totalAmount) || 0;
+        return sum + total * (isFinite(vRate) ? vRate : DEFAULT_PLATFORM_RATE);
+      }, 0);
+
+    const totalCommission = sumCommission(paidOrders);
+
+    // This month only
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const paidThisMonth = paidOrders.filter(
+      (o) => new Date(o.createdAt) >= monthStart
+    );
+    const monthCommission = sumCommission(paidThisMonth);
+
+    res.json({
+      totalUsers,
+      totalVendors,
+      totalOrders,
+      totalRevenue,
+      totalCommission,
+      monthCommission,
+    });
   } catch (err) {
     res.status(500).json({ message: "Overview fetch failed", error: err.message });
   }
 });
-
 /* ----------------- users ----------------- */
 router.get("/users", authenticateToken, requireAdmin, async (_req, res) => {
   try {
