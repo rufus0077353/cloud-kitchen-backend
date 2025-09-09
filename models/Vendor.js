@@ -6,7 +6,7 @@ module.exports = (sequelize, DataTypes) => {
     UserId:   { type: DataTypes.INTEGER, allowNull: false, unique: true },
     // NEW: open/closed switch
     isOpen:   { type: DataTypes.BOOLEAN, allowNull:false , defaultValue: true },
-    commissionRate: { type: DataTypes.FLOAT, allowNull: false, defaultValue: 0.1 }, // 10% default
+    commissionRate: { type: DataTypes.FLOAT, allowNull: false, defaultValue: 0.15 }, // 15% default
   }, {
     tableName: "vendors",
     timestamps: true,
