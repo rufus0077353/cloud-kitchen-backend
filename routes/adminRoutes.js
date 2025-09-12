@@ -190,6 +190,7 @@ router.post("/vendors", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
+// PUT /api/admin/vendors/:id
 router.put("/vendors/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const vendor = await Vendor.findByPk(req.params.id);
@@ -202,9 +203,31 @@ router.put("/vendors/:id", authenticateToken, requireAdmin, async (req, res) => 
     if (location != null) vendor.location = location;
     if (UserId != null) vendor.UserId = UserId;
     if (typeof isOpen === "boolean") vendor.isOpen = isOpen;
-    if (commissionRate != null && commissionRate !== "") {
-      vendor.commissionRate = Number(commissionRate);
+
+    // ----- commissionRate handling -----
+    if (commissionRate !== undefined && commissionRate !== null && commissionRate !== "") {
+      let raw = commissionRate;
+
+      // allow strings like "15" or "15%" or "0.15"
+      if (typeof raw === "string") raw = raw.trim().replace("%", "");
+      let num = Number(raw);
+
+      if (!Number.isFinite(num)) {
+        return res.status(400).json({ message: "commissionRate must be a number or percent" });
+      }
+
+      // If they sent 15 (or "15"), treat it as 15% -> 0.15
+      if (num > 1) num = num / 100;
+
+      // require 0..1 after normalization
+      if (num < 0 || num > 1) {
+        return res.status(400).json({ message: "commissionRate must be between 0 and 1 (e.g. 0.15 for 15%)" });
+      }
+
+      // round to 4 decimals to avoid float noise (optional)
+      vendor.commissionRate = Math.round(num * 10000) / 10000;
     }
+    // -----------------------------------
 
     await vendor.save();
     res.json({ message: "Vendor updated", vendor });
