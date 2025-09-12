@@ -1,4 +1,5 @@
 
+// adminRoutes.js
 const express = require("express");
 const router = express.Router();
 const bcrypt = require("bcrypt");
@@ -6,11 +7,11 @@ const { User, Vendor, Order, MenuItem } = require("../models");
 const { authenticateToken, requireAdmin } = require("../middleware/authMiddleware");
 const { Op, Sequelize } = require("sequelize");
 
-const DEFAULT_PLATFORM_RATE = Number(process.env.PLATFORM_RATE || 0.15); // 15%
+// 15% default platform rate unless overridden per vendor
+const DEFAULT_PLATFORM_RATE = Number(process.env.PLATFORM_RATE || 0.15);
 
 /* ----------------- helpers ----------------- */
 function normalizeOrderFilters(req) {
-  // accept from either query (GET) or body (POST)
   const src = req.method === "GET" ? (req.query || {}) : (req.body || {});
   const val = (a, b) => (src[a] ?? src[b] ?? "").toString().trim();
 
@@ -18,7 +19,6 @@ function normalizeOrderFilters(req) {
   const VendorId = val("VendorId", "vendorId");
   const status   = val("status",   "Status");
 
-  // date keys accepted: startDate/endDate OR From/To
   const startRaw = val("startDate", "From");
   const endRaw   = val("endDate",   "To");
 
@@ -55,7 +55,6 @@ router.get("/overview", authenticateToken, requireAdmin, async (_req, res) => {
       Order.sum("totalAmount"),
     ]);
 
-    // Only paid & not canceled/rejected count towards commission
     const paidWhere = {
       paymentStatus: "paid",
       status: { [Op.notIn]: ["rejected", "canceled", "cancelled"] },
@@ -140,7 +139,6 @@ router.delete("/users/:id", authenticateToken, requireAdmin, async (req, res) =>
   try {
     const user = await User.findByPk(req.params.id);
     if (!user) return res.status(404).json({ message: "User not found" });
-
     await user.destroy();
     res.json({ message: "User deleted" });
   } catch (err) {
@@ -163,7 +161,7 @@ router.put("/promote/:id", authenticateToken, requireAdmin, async (req, res) => 
   }
 });
 
-/* ----------------- vendors ----------------- */
+/* ----------------- vendors (with commission) ----------------- */
 router.get("/vendors", authenticateToken, requireAdmin, async (_req, res) => {
   try {
     const vendors = await Vendor.findAll();
@@ -174,14 +172,17 @@ router.get("/vendors", authenticateToken, requireAdmin, async (_req, res) => {
 });
 
 router.post("/vendors", authenticateToken, requireAdmin, async (req, res) => {
-  const { name, cuisine, commissionRate } = req.body || {};
+  const { name, cuisine, location, UserId, isOpen, commissionRate } = req.body || {};
   if (!name || !cuisine) return res.status(400).json({ message: "Name and cuisine are required" });
 
   try {
     const newVendor = await Vendor.create({
       name,
       cuisine,
-      commissionRate: commissionRate != null ? Number(commissionRate) : undefined,
+      location: location ?? "",
+      UserId: UserId ?? null,
+      isOpen: typeof isOpen === "boolean" ? isOpen : true,
+      commissionRate: commissionRate != null ? Number(commissionRate) : DEFAULT_PLATFORM_RATE,
     });
     res.status(201).json({ message: "Vendor created", newVendor });
   } catch (err) {
@@ -194,9 +195,13 @@ router.put("/vendors/:id", authenticateToken, requireAdmin, async (req, res) => 
     const vendor = await Vendor.findByPk(req.params.id);
     if (!vendor) return res.status(404).json({ message: "Vendor not found" });
 
-    const { name, cuisine, commissionRate } = req.body || {};
-    if (name) vendor.name = name;
-    if (cuisine) vendor.cuisine = cuisine;
+    const { name, cuisine, location, UserId, isOpen, commissionRate } = req.body || {};
+
+    if (name != null) vendor.name = name;
+    if (cuisine != null) vendor.cuisine = cuisine;
+    if (location != null) vendor.location = location;
+    if (UserId != null) vendor.UserId = UserId;
+    if (typeof isOpen === "boolean") vendor.isOpen = isOpen;
     if (commissionRate != null && commissionRate !== "") {
       vendor.commissionRate = Number(commissionRate);
     }
@@ -212,7 +217,6 @@ router.delete("/vendors/:id", authenticateToken, requireAdmin, async (req, res) 
   try {
     const vendor = await Vendor.findByPk(req.params.id);
     if (!vendor) return res.status(404).json({ message: "Vendor not found" });
-
     await vendor.destroy();
     res.json({ message: "Vendor deleted" });
   } catch (err) {
@@ -220,8 +224,37 @@ router.delete("/vendors/:id", authenticateToken, requireAdmin, async (req, res) 
   }
 });
 
+/** Bulk set commission rate for ALL vendors (use carefully)
+ *  Body: { value: 0.15 }  // 15%
+ */
+router.patch("/vendors/commission-bulk", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const value = Number(req.body?.value);
+    if (!Number.isFinite(value) || value < 0 || value > 1) {
+      return res.status(400).json({ message: "Provide a decimal between 0 and 1, e.g. 0.15 for 15%" });
+    }
+    const [count] = await Vendor.update({ commissionRate: value }, { where: {} });
+    res.json({ message: `Updated commissionRate for ${count} vendors`, value });
+  } catch (err) {
+    res.status(500).json({ message: "Bulk commission update failed", error: err.message });
+  }
+});
+
+/** Set commission only where it's missing (null) */
+router.patch("/vendors/commission-missing", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const value = Number(req.body?.value ?? DEFAULT_PLATFORM_RATE);
+    const [count] = await Vendor.update(
+      { commissionRate: value },
+      { where: { commissionRate: { [Op.is]: null } } }
+    );
+    res.json({ message: `Set commissionRate=${value} for ${count} vendors that were null` });
+  } catch (err) {
+    res.status(500).json({ message: "Commission patch failed", error: err.message });
+  }
+});
+
 /* ----------------- orders (admin filters + commission) ----------------- */
-// GET with querystring OR POST with JSON body both support: UserId, VendorId, status, startDate/From, endDate/To
 router.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const where = normalizeOrderFilters(req);
@@ -236,7 +269,6 @@ router.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
       order: [["createdAt", "DESC"]],
     });
 
-    // attach commission
     const data = orders.map((o) => {
       const plain = o.toJSON();
       plain.commission = commissionFor(plain);
