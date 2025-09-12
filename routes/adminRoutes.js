@@ -1,3 +1,4 @@
+
 const express = require("express");
 const router = express.Router();
 const bcrypt = require("bcrypt");
@@ -5,13 +6,12 @@ const { User, Vendor, Order, MenuItem } = require("../models");
 const { authenticateToken, requireAdmin } = require("../middleware/authMiddleware");
 const { Op, Sequelize } = require("sequelize");
 
-const DEFAULT_PLATFORM_RATE = Number(process.env.PLATFORM_RATE || 0.15) // 15%
+const DEFAULT_PLATFORM_RATE = Number(process.env.PLATFORM_RATE || 0.15); // 15%
 
 /* ----------------- helpers ----------------- */
 function normalizeOrderFilters(req) {
   // accept from either query (GET) or body (POST)
-  const src = req.method === "GET" ? req.query : (req.body || {});
-  // accept both lower & UPPER case keys
+  const src = req.method === "GET" ? (req.query || {}) : (req.body || {});
   const val = (a, b) => (src[a] ?? src[b] ?? "").toString().trim();
 
   const UserId   = val("UserId",   "userId");
@@ -35,15 +35,25 @@ function normalizeOrderFilters(req) {
   return where;
 }
 
-/* ----------------- overview ----------------- */
+const money = (n) => Number((Number(n || 0)).toFixed(2));
+const commissionFor = (orderPlain) => {
+  const total = Number(orderPlain?.totalAmount || 0);
+  const rate =
+    orderPlain?.Vendor?.commissionRate != null
+      ? Number(orderPlain.Vendor.commissionRate)
+      : DEFAULT_PLATFORM_RATE;
+  return money(total * (isFinite(rate) ? rate : DEFAULT_PLATFORM_RATE));
+};
 
-// Overview (adds totalCommission + monthCommission)
+/* ----------------- overview (adds commission totals) ----------------- */
 router.get("/overview", authenticateToken, requireAdmin, async (_req, res) => {
   try {
-    const totalUsers    = await User.count();
-    const totalVendors  = await Vendor.count();
-    const totalOrders   = await Order.count();
-    const totalRevenue  = await Order.sum("totalAmount");
+    const [totalUsers, totalVendors, totalOrders, totalRevenueRaw] = await Promise.all([
+      User.count(),
+      Vendor.count(),
+      Order.count(),
+      Order.sum("totalAmount"),
+    ]);
 
     // Only paid & not canceled/rejected count towards commission
     const paidWhere = {
@@ -51,45 +61,37 @@ router.get("/overview", authenticateToken, requireAdmin, async (_req, res) => {
       status: { [Op.notIn]: ["rejected", "canceled", "cancelled"] },
     };
 
-    // Lifetime commission: compute in JS so we can safely fall back to DEFAULT_PLATFORM_RATE
     const paidOrders = await Order.findAll({
       where: paidWhere,
       include: [{ model: Vendor, attributes: ["id", "commissionRate"] }],
       attributes: ["id", "totalAmount", "VendorId", "createdAt"],
+      order: [["createdAt", "DESC"]],
+      raw: true,
+      nest: true,
     });
 
-    const sumCommission = (orders) =>
-      orders.reduce((sum, o) => {
-        const vRate =
-          o?.Vendor?.commissionRate != null
-            ? Number(o.Vendor.commissionRate)
-            : DEFAULT_PLATFORM_RATE;
-        const total = Number(o.totalAmount) || 0;
-        return sum + total * (isFinite(vRate) ? vRate : DEFAULT_PLATFORM_RATE);
-      }, 0);
+    const totalCommission = paidOrders.reduce((sum, o) => sum + commissionFor(o), 0);
 
-    const totalCommission = sumCommission(paidOrders);
-
-    // This month only
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const paidThisMonth = paidOrders.filter(
-      (o) => new Date(o.createdAt) >= monthStart
-    );
-    const monthCommission = sumCommission(paidThisMonth);
+    const monthCommission = paidOrders
+      .filter((o) => new Date(o.createdAt) >= monthStart)
+      .reduce((sum, o) => sum + commissionFor(o), 0);
 
     res.json({
       totalUsers,
       totalVendors,
       totalOrders,
-      totalRevenue,
-      totalCommission,
-      monthCommission,
+      totalRevenue: money(totalRevenueRaw || 0),
+      totalCommission: money(totalCommission),
+      monthCommission: money(monthCommission),
     });
   } catch (err) {
+    console.error("overview error:", err);
     res.status(500).json({ message: "Overview fetch failed", error: err.message });
   }
 });
+
 /* ----------------- users ----------------- */
 router.get("/users", authenticateToken, requireAdmin, async (_req, res) => {
   try {
@@ -172,11 +174,15 @@ router.get("/vendors", authenticateToken, requireAdmin, async (_req, res) => {
 });
 
 router.post("/vendors", authenticateToken, requireAdmin, async (req, res) => {
-  const { name, cuisine } = req.body || {};
+  const { name, cuisine, commissionRate } = req.body || {};
   if (!name || !cuisine) return res.status(400).json({ message: "Name and cuisine are required" });
 
   try {
-    const newVendor = await Vendor.create({ name, cuisine });
+    const newVendor = await Vendor.create({
+      name,
+      cuisine,
+      commissionRate: commissionRate != null ? Number(commissionRate) : undefined,
+    });
     res.status(201).json({ message: "Vendor created", newVendor });
   } catch (err) {
     res.status(500).json({ message: "Vendor creation failed", error: err.message });
@@ -188,9 +194,12 @@ router.put("/vendors/:id", authenticateToken, requireAdmin, async (req, res) => 
     const vendor = await Vendor.findByPk(req.params.id);
     if (!vendor) return res.status(404).json({ message: "Vendor not found" });
 
-    const { name, cuisine } = req.body || {};
-    vendor.name = name || vendor.name;
-    vendor.cuisine = cuisine || vendor.cuisine;
+    const { name, cuisine, commissionRate } = req.body || {};
+    if (name) vendor.name = name;
+    if (cuisine) vendor.cuisine = cuisine;
+    if (commissionRate != null && commissionRate !== "") {
+      vendor.commissionRate = Number(commissionRate);
+    }
 
     await vendor.save();
     res.json({ message: "Vendor updated", vendor });
@@ -211,41 +220,12 @@ router.delete("/vendors/:id", authenticateToken, requireAdmin, async (req, res) 
   }
 });
 
-/* ----------------- orders (admin filters) ----------------- */
-
-// Orders (admin filters)
+/* ----------------- orders (admin filters + commission) ----------------- */
+// GET with querystring OR POST with JSON body both support: UserId, VendorId, status, startDate/From, endDate/To
 router.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const q = req.query || {};
-    const where = {};
-    if (q.UserId)   where.UserId   = q.UserId;
-    if (q.VendorId) where.VendorId = q.VendorId;
-    if (q.status)   where.status   = q.status;
-
-    const orders = await Order.findAll({
-      where,
-      include: [
-        { model: User, attributes: ["id", "name", "email"] },
-        { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
-        {
-          model: MenuItem,
-          attributes: ["id", "name", "price"],
-          through: { attributes: ["quantity"] },
-        },
-      ],
-      order: [["createdAt", "DESC"]],
-    });
-
-    return res.json(orders);
-  } catch (err) {
-    console.error("ADMIN /orders failed:", err); // 👈 log full error
-    return res.status(500).json({ message: "Orders fetch failed", error: err.message });
-  }
-});
-// POST alias to help older/frontends that send JSON instead of querystring
-router.post("/orders", authenticateToken, requireAdmin, async (req, res) => {
-  try {
     const where = normalizeOrderFilters(req);
+
     const orders = await Order.findAll({
       where,
       include: [
@@ -255,7 +235,43 @@ router.post("/orders", authenticateToken, requireAdmin, async (req, res) => {
       ],
       order: [["createdAt", "DESC"]],
     });
-    res.json(orders);
+
+    // attach commission
+    const data = orders.map((o) => {
+      const plain = o.toJSON();
+      plain.commission = commissionFor(plain);
+      return plain;
+    });
+
+    res.json(data);
+  } catch (err) {
+    console.error("ADMIN /orders failed:", err);
+    res.status(500).json({ message: "Orders fetch failed", error: err.message });
+  }
+});
+
+// POST alias (same behavior as GET)
+router.post("/orders", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const where = normalizeOrderFilters(req);
+
+    const orders = await Order.findAll({
+      where,
+      include: [
+        { model: User,   attributes: ["id", "name", "email"] },
+        { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
+        { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
+      ],
+      order: [["createdAt", "DESC"]],
+    });
+
+    const data = orders.map((o) => {
+      const plain = o.toJSON();
+      plain.commission = commissionFor(plain);
+      return plain;
+    });
+
+    res.json(data);
   } catch (err) {
     res.status(500).json({ message: "Orders fetch failed", error: err.message });
   }
