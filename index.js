@@ -1,4 +1,4 @@
-
+// backend/index.js (READY-PASTE)
 require("dotenv").config();
 
 const express = require("express");
@@ -23,10 +23,7 @@ const DEFAULT_ORIGINS = [
   "https://glistening-taffy-7be8bf.netlify.app",
   "http://localhost:3000",
 ];
-const FRONTENDS = (process.env.CORS_ORIGINS
-  ? process.env.CORS_ORIGINS.split(",")
-  : DEFAULT_ORIGINS
-)
+const FRONTENDS = (process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(",") : DEFAULT_ORIGINS)
   .map((s) => s.trim())
   .filter(Boolean);
 
@@ -40,14 +37,11 @@ app.use(
   cors({
     origin: (origin, cb) => {
       if (!origin) return cb(null, true); // health checks / curl / same-origin
-      return FRONTENDS.includes(origin)
-        ? cb(null, true)
-        : cb(new Error("Not allowed by CORS"));
+      return FRONTENDS.includes(origin) ? cb(null, true) : cb(new Error("Not allowed by CORS"));
     },
     credentials: true,
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS",
-    allowedHeaders:
-      "Content-Type, Authorization, X-Requested-With, Idempotency-Key",
+    allowedHeaders: "Content-Type, Authorization, X-Requested-With, Idempotency-Key",
   })
 );
 
@@ -56,6 +50,7 @@ app.use(
   helmet({
     contentSecurityPolicy: false, // relax CSP for now, can tighten later
     crossOriginResourcePolicy: { policy: "cross-origin" },
+    crossOriginEmbedderPolicy: false,
   })
 );
 
@@ -142,12 +137,18 @@ const orderRoutes = require("./routes/orderRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 const pushRoutes = require("./routes/pushRoutes");
 
-// Optional route: paymentRoutes might not exist yet
-let paymentRoutes = null;
+// Optional: payments router (support either filename)
+let paymentsRouter = null;
 try {
-  paymentRoutes = require("./routes/paymentRoutes");
-} catch (e) {
-  console.warn("⚠️  paymentRoutes not found — skipping /api/payments mount for now.");
+  // prefer ./routes/payments.js
+  paymentsRouter = require("./routes/payments");
+} catch (_) {
+  try {
+    // fallback to ./routes/paymentRoutes.js if that's what you have
+    paymentsRouter = require("./routes/paymentRoutes");
+  } catch (e2) {
+    console.warn("⚠️  payments router not found — skipping /api/payments for now.");
+  }
 }
 
 // Helpers to mount routers
@@ -182,9 +183,18 @@ mountWithEmit("/api/orders", orderRoutes);
 mountSafe("/api/push", pushRoutes);
 mountSafe("/api/admin", adminRoutes);
 
-// Mount optional payments
-if (paymentRoutes) {
-  mountWithEmit("/api/payments", paymentRoutes);
+// Mount optional payments (BEFORE 404)
+if (paymentsRouter) {
+  mountWithEmit("/api/payments", paymentsRouter);
+  // Log status (if your config exports it)
+  try {
+    const { paymentsEnabled, razorpayKeyId } = require("./config/payments");
+    console.log(
+      `💳 Payments router mounted. Enabled: ${!!paymentsEnabled} | KeyId present: ${!!razorpayKeyId}`
+    );
+  } catch (_) {
+    console.log("💳 Payments router mounted.");
+  }
 }
 
 // Public key endpoint
@@ -196,10 +206,8 @@ app.get("/public-key", (_req, res) => {
 app.get("/ping", (_req, res) => res.send("pong"));
 app.get("/", (_req, res) => res.send("✅ Cloud Kitchen Backend is live!"));
 
-// 404 fallback
+// 404 fallback (must be AFTER all mounts)
 app.use((req, res) => res.status(404).json({ message: "Route not found" }));
-
-app.use("/api/payments", require("./routes/payments"));
 
 // Global error handler
 app.use((err, req, res, next) => {
