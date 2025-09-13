@@ -96,19 +96,6 @@ app.set("io", io);
 app.set("emitToVendor", emitToVendor);
 app.set("emitToUser", emitToUser);
 
-// expose helpers
-const emitToVendor = (vendorId, event, payload) => {
-  if (!vendorId) return;
-  io.to(`vendor:${vendorId}`).emit(event, payload);
-};
-const emitToUser = (userId, event, payload) => {
-  if (!userId) return;
-  io.to(`user:${userId}`).emit(event, payload);
-};
-app.set("io", io);
-app.set("emitToVendor", emitToVendor);
-app.set("emitToUser", emitToUser);
-
 // Rooms
 io.on("connection", (socket) => {
   console.log("🔌 socket connected", socket.id);
