@@ -1,4 +1,3 @@
-// backend/index.js (READY-PASTE)
 require("dotenv").config();
 
 const express = require("express");
@@ -11,7 +10,7 @@ const compression = require("compression");
 const morgan = require("morgan");
 
 // ---- DB ----
-const db = require("./models"); // includes sequelize instance
+const db = require("./models");
 
 // ---- App ----
 const app = express();
@@ -31,8 +30,6 @@ const FRONTENDS = (process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(","
 app.set("trust proxy", 1);
 
 // ---- Security & Middleware ----
-
-// CORS allowlist
 app.use(
   cors({
     origin: (origin, cb) => {
@@ -45,22 +42,16 @@ app.use(
   })
 );
 
-// Security headers
 app.use(
   helmet({
-    contentSecurityPolicy: false, // relax CSP for now, can tighten later
+    contentSecurityPolicy: false,
     crossOriginResourcePolicy: { policy: "cross-origin" },
     crossOriginEmbedderPolicy: false,
   })
 );
 
-// Gzip compression
 app.use(compression());
-
-// Logging
 app.use(morgan(process.env.NODE_ENV === "production" ? "tiny" : "dev"));
-
-// JSON body size guard
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "250kb" }));
 
@@ -84,14 +75,29 @@ app.use(
   })
 );
 
-// ---- HTTP server + Socket.IO ----
-const http = require("http");
+// ---- HTTP server + Socket.IO (single instance) ----
 const server = http.createServer(app);
+const io = new Server(server, {
+  path: "/socket.io",
+  cors: {
+    origin: FRONTENDS,
+    methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
+    credentials: true,
+  },
+  pingInterval: 25000,
+  pingTimeout: 60000,
+  allowEIO3: true,
+});
 
-const { initSocket, emitToVendor, emitToUser } = require("./socket");
-const io = initSocket(server, FRONTENDS);
-
-// expose helpers for routes
+// socket helpers exposed to routes
+const emitToVendor = (vendorId, event, payload) => {
+  if (!vendorId) return;
+  io.to(`vendor:${vendorId}`).emit(event, payload);
+};
+const emitToUser = (userId, event, payload) => {
+  if (!userId) return;
+  io.to(`user:${userId}`).emit(event, payload);
+};
 app.set("io", io);
 app.set("emitToVendor", emitToVendor);
 app.set("emitToUser", emitToUser);
@@ -104,7 +110,7 @@ io.on("connection", (socket) => {
   socket.on("user:join", (userId) => userId && socket.join(`user:${userId}`));
 
   socket.on("auth:refresh", () => {
-    // no-op placeholder; add token checks here if needed
+    // add token checks here if needed
   });
 
   socket.on("disconnect", (reason) => {
@@ -112,10 +118,9 @@ io.on("connection", (socket) => {
   });
 });
 
-// ---- Routes (safe mounting) ----
+// ---- Routes ----
 const { VAPID_PUBLIC_KEY } = require("./utils/push");
 
-// Required routes
 const authRoutes = require("./routes/authRoutes");
 const vendorRoutes = require("./routes/vendorRoutes");
 const menuItemRoutes = require("./routes/menuItemRoutes");
@@ -123,21 +128,18 @@ const orderRoutes = require("./routes/orderRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 const pushRoutes = require("./routes/pushRoutes");
 
-// Optional: payments router (support either filename)
+// Optional payments router: support either file name
 let paymentsRouter = null;
 try {
-  // prefer ./routes/payments.js
   paymentsRouter = require("./routes/payments");
-} catch (_) {
+} catch {
   try {
-    // fallback to ./routes/paymentRoutes.js if that's what you have
     paymentsRouter = require("./routes/paymentRoutes");
-  } catch (e2) {
-    console.warn("⚠️  payments router not found — skipping /api/payments for now.");
+  } catch {
+    console.warn("⚠️  payments router not found — skipping /api/payments");
   }
 }
 
-// Helpers to mount routers
 const mountSafe = (path, router) => {
   if (router && typeof router === "function") {
     app.use(path, router);
@@ -161,27 +163,13 @@ const mountWithEmit = (path, router) => {
   }
 };
 
-// Mount required
 mountSafe("/api/auth", authRoutes);
 mountSafe("/api/vendors", vendorRoutes);
 mountSafe("/api/menu-items", menuItemRoutes);
 mountWithEmit("/api/orders", orderRoutes);
 mountSafe("/api/push", pushRoutes);
 mountSafe("/api/admin", adminRoutes);
-
-// Mount optional payments (BEFORE 404)
-if (paymentsRouter) {
-  mountWithEmit("/api/payments", paymentsRouter);
-  // Log status (if your config exports it)
-  try {
-    const { paymentsEnabled, razorpayKeyId } = require("./config/payments");
-    console.log(
-      `💳 Payments router mounted. Enabled: ${!!paymentsEnabled} | KeyId present: ${!!razorpayKeyId}`
-    );
-  } catch (_) {
-    console.log("💳 Payments router mounted.");
-  }
-}
+if (paymentsRouter) mountWithEmit("/api/payments", paymentsRouter); // mount once
 
 // Public key endpoint
 app.get("/public-key", (_req, res) => {
@@ -192,11 +180,11 @@ app.get("/public-key", (_req, res) => {
 app.get("/ping", (_req, res) => res.send("pong"));
 app.get("/", (_req, res) => res.send("✅ Cloud Kitchen Backend is live!"));
 
-// 404 fallback (must be AFTER all mounts)
+// 404 fallback (after all routes)
 app.use((req, res) => res.status(404).json({ message: "Route not found" }));
 
 // Global error handler
-app.use((err, req, res, next) => {
+app.use((err, req, res, _next) => {
   console.error("Unhandled error:", err.message || err);
   if (err.message === "Not allowed by CORS") {
     return res.status(403).json({ message: "CORS blocked" });
@@ -214,9 +202,7 @@ db.sequelize
     try {
       const tables = await db.sequelize.getQueryInterface().showAllTables();
       console.log("🧩 Tables in DB:", tables);
-    } catch {
-      // ignore
-    }
+    } catch {}
     server.listen(PORT, () => {
       console.log(`🚀 Server (HTTP + Socket.IO) listening on port ${PORT}`);
       console.log("🌐 Allowed origins:", FRONTENDS.join(", "));
