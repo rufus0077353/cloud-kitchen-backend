@@ -1,10 +1,24 @@
+// backend/routes/menuItemRoutes.js  (READY-PASTE)
 const express = require("express");
 const router = express.Router();
 const { MenuItem } = require("../models");
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 
-// GET all menu items for THIS vendor
+/* ---------- helpers ---------- */
+const isHttpUrl = (v) => {
+  if (!v) return true; // optional
+  try {
+    const u = new URL(v);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+};
+
+const publicAttrs = ["id", "name", "price", "description", "isAvailable", "imageUrl", "VendorId", "createdAt", "updatedAt"];
+
+/* ---------- GET all menu items for THIS vendor ---------- */
 router.get(
   "/mine",
   authenticateToken,
@@ -14,6 +28,7 @@ router.get(
     try {
       const items = await MenuItem.findAll({
         where: { VendorId: req.vendor.id },
+        attributes: publicAttrs,
         order: [["createdAt", "DESC"]],
       });
       res.json(items);
@@ -23,7 +38,7 @@ router.get(
   }
 );
 
-// Public list (optionally by vendor)
+/* ---------- Public list (optionally by vendor) ---------- */
 router.get("/", async (req, res) => {
   try {
     const { vendorId } = req.query;
@@ -33,6 +48,7 @@ router.get("/", async (req, res) => {
 
     const items = await MenuItem.findAll({
       where: { VendorId: idNum, isAvailable: true },
+      attributes: publicAttrs,
       order: [["createdAt", "DESC"]],
     });
     res.json(items);
@@ -41,7 +57,7 @@ router.get("/", async (req, res) => {
   }
 });
 
-// CREATE (derive VendorId from ensured profile)
+/* ---------- CREATE (derive VendorId from ensured profile) ---------- */
 router.post(
   "/",
   authenticateToken,
@@ -49,17 +65,22 @@ router.post(
   ensureVendorProfile,
   async (req, res) => {
     try {
-      const { name, price, description, isAvailable } = req.body || {};
+      const { name, price, description, isAvailable, imageUrl } = req.body || {};
       const priceNum = Number(price);
+
       if (!name || !Number.isFinite(priceNum)) {
         return res.status(400).json({ message: "Name and numeric price are required" });
+      }
+      if (!isHttpUrl(imageUrl)) {
+        return res.status(400).json({ message: "imageUrl must be an http(s) URL if provided" });
       }
 
       const item = await MenuItem.create({
         name,
         price: priceNum,
-        description,
+        description: description ?? null,
         isAvailable: typeof isAvailable === "boolean" ? isAvailable : true,
+        imageUrl: imageUrl || null,
         VendorId: req.vendor.id,
       });
 
@@ -70,7 +91,7 @@ router.post(
   }
 );
 
-// UPDATE (ownership check)
+/* ---------- UPDATE (ownership check) ---------- */
 router.put(
   "/:id",
   authenticateToken,
@@ -82,14 +103,19 @@ router.put(
       if (!item) return res.status(404).json({ message: "Menu item not found" });
       if (item.VendorId !== req.vendor.id) return res.status(403).json({ message: "Not your menu item" });
 
-      const { name, price, description, isAvailable } = req.body || {};
+      const { name, price, description, isAvailable, imageUrl } = req.body || {};
       const priceNum = price !== undefined ? Number(price) : undefined;
+
+      if (imageUrl !== undefined && !isHttpUrl(imageUrl)) {
+        return res.status(400).json({ message: "imageUrl must be an http(s) URL if provided" });
+      }
 
       await item.update({
         name: name ?? item.name,
         price: priceNum === undefined || Number.isNaN(priceNum) ? item.price : priceNum,
         description: description ?? item.description,
         isAvailable: typeof isAvailable === "boolean" ? isAvailable : item.isAvailable,
+        imageUrl: imageUrl === undefined ? item.imageUrl : (imageUrl || null), // allow clearing to null
       });
 
       res.json({ message: "Menu item updated", item });
@@ -99,7 +125,7 @@ router.put(
   }
 );
 
-// DELETE (ownership check)
+/* ---------- DELETE (ownership check) ---------- */
 router.delete(
   "/:id",
   authenticateToken,
