@@ -5,6 +5,8 @@ module.exports = (sequelize, DataTypes) => {
     description: { type: DataTypes.STRING },
     isAvailable: { type: DataTypes.BOOLEAN, defaultValue: true },
     VendorId:    { type: DataTypes.INTEGER, allowNull: false },
+    imageURL:   { type: DataTypes.STRING, allowNull: true, validate: { isUrl: true } 
+  },
   }, {
     tableName: "menu_items",
     timestamps: true,
