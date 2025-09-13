@@ -8,6 +8,9 @@ const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const compression = require("compression");
 const morgan = require("morgan");
+const path = require("path");
+
+
 
 // ---- DB ----
 const db = require("./models");
@@ -54,6 +57,8 @@ app.use(compression());
 app.use(morgan(process.env.NODE_ENV === "production" ? "tiny" : "dev"));
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "250kb" }));
+
+app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
 // Rate limits
 app.use(
@@ -127,6 +132,7 @@ const menuItemRoutes = require("./routes/menuItemRoutes");
 const orderRoutes = require("./routes/orderRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 const pushRoutes = require("./routes/pushRoutes");
+const uploadRoutes = require("./routes/uploadRoutes");
 
 // Optional payments router: support either file name
 let paymentsRouter = null;
@@ -169,6 +175,7 @@ mountSafe("/api/menu-items", menuItemRoutes);
 mountWithEmit("/api/orders", orderRoutes);
 mountSafe("/api/push", pushRoutes);
 mountSafe("/api/admin", adminRoutes);
+mountSafe("/api/uploads", uploadRoutes);
 if (paymentsRouter) mountWithEmit("/api/payments", paymentsRouter); // mount once
 
 // Public key endpoint
