@@ -85,17 +85,16 @@ app.use(
 );
 
 // ---- HTTP server + Socket.IO ----
+const http = require("http");
 const server = http.createServer(app);
-const io = new Server(server, {
-  path: "/socket.io",
-  cors: {
-    origin: FRONTENDS,
-    methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
-    credentials: true,
-  },
-  pingInterval: 25000,
-  pingTimeout: 60000,
-});
+
+const { initSocket, emitToVendor, emitToUser } = require("./socket");
+const io = initSocket(server, FRONTENDS);
+
+// expose helpers for routes
+app.set("io", io);
+app.set("emitToVendor", emitToVendor);
+app.set("emitToUser", emitToUser);
 
 // expose helpers
 const emitToVendor = (vendorId, event, payload) => {
