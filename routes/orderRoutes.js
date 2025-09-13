@@ -1,5 +1,4 @@
 
-// backend/routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
 const { Op } = require("sequelize");
@@ -54,7 +53,6 @@ async function audit(req, { action, order = null, details = {} }) {
 
 /* ----------------- helpers ----------------- */
 function parsePageParams(q) {
-  // page=0 => no pagination (legacy mode)
   const pageRaw = Number(q.page);
   const page = Number.isFinite(pageRaw) ? Math.max(0, pageRaw) : 0;
   const pageSizeRaw = Number(q.pageSize);
@@ -73,7 +71,7 @@ async function safeFindIdempotencyKey(key, userId, t) {
   try {
     return await IdempotencyKey.findOne({ where: { key, userId }, transaction: t });
   } catch (err) {
-    if (isMissingTableError(err)) return null; // table not migrated: ignore idempotency
+    if (isMissingTableError(err)) return null;
     throw err;
   }
 }
@@ -83,7 +81,7 @@ async function safeCreateIdempotencyKey(record, t) {
   try {
     await IdempotencyKey.create(record, { transaction: t });
   } catch (err) {
-    if (isMissingTableError(err)) return; // ignore if table missing
+    if (isMissingTableError(err)) return;
     throw err;
   }
 }
@@ -113,7 +111,6 @@ router.get("/my", authenticateToken, async (req, res) => {
       });
     }
 
-    // legacy (no pagination)
     const orders = await Order.findAll({
       where: { UserId: req.user.id },
       include: [
@@ -159,7 +156,6 @@ router.get(
         });
       }
 
-      // legacy (no pagination)
       const orders = await Order.findAll({
         where: { VendorId: vendorId },
         include: [
@@ -192,7 +188,6 @@ router.get(
       const startOfWeek  = () => { const d = new Date(); const diff = (d.getDay()+6)%7; d.setHours(0,0,0,0); d.setDate(d.getDate()-diff); return d; };
       const startOfMonth = () => { const d = new Date(); d.setHours(0,0,0,0); d.setDate(1); return d; };
 
-      // exclude canceled & rejected from revenue
       const nonRevenueStatuses = ["rejected", "canceled"];
       const revenueWhere = { VendorId: vendorId, status: { [Op.notIn]: nonRevenueStatuses } };
 
@@ -259,13 +254,12 @@ router.get(
       start.setDate(start.getDate() - (days - 1));
 
       const sequelizeLocal = Order.sequelize;
-      // exclude canceled & rejected from revenue and order count
       const [rows] = await sequelizeLocal.query(
         `
         SELECT
           to_char(date_trunc('day', "createdAt"), 'YYYY-MM-DD') AS date,
-          COUNT(*) FILTER (WHERE status NOT IN ('rejected','canceled'))                                     AS orders,
-          COALESCE(SUM(CASE WHEN status NOT IN ('rejected','canceled') THEN "totalAmount" END), 0)           AS revenue
+          COUNT(*) FILTER (WHERE status NOT IN ('rejected','canceled'))                                       AS orders,
+          COALESCE(SUM(CASE WHEN status NOT IN ('rejected','canceled') THEN "totalAmount" END), 0)             AS revenue
         FROM "orders"
         WHERE "VendorId" = :vendorId
           AND "createdAt" >= :startDate
@@ -316,7 +310,7 @@ router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
   }
 });
 
-// GET one order (user can see their own, vendor can see theirs, admin can see all)
+/* ----------------- GET one order ----------------- */
 router.get("/:id", authenticateToken, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -364,7 +358,7 @@ router.post("/", authenticateToken, async (req, res) => {
       return res.status(400).json({ message: "At least one item is required" });
     }
 
-    // STEP 1: idempotency lookup (safe even if table missing)
+    // STEP 1: idempotency lookup
     if (idemKey) {
       const existingKey = await safeFindIdempotencyKey(idemKey, req.user.id, t);
       if (existingKey?.orderId) {
@@ -377,7 +371,8 @@ router.post("/", authenticateToken, async (req, res) => {
           transaction: t,
         });
         await t.commit();
-        return res.status(200).json({ message: "Order already created", order: existingOrder });
+        // ⬅ return the order directly (shape matches frontend)
+        return res.status(200).json(existingOrder);
       }
     }
 
@@ -462,7 +457,7 @@ router.post("/", authenticateToken, async (req, res) => {
       await safeCreateIdempotencyKey({ key: idemKey, userId: req.user.id, orderId: order.id }, t);
     }
 
-    // Reload full order (with includes)
+    // Reload full order
     const fullOrder = await Order.findByPk(order.id, {
       include: [
         { model: User, attributes: ["id", "name", "email"] },
@@ -483,7 +478,6 @@ router.post("/", authenticateToken, async (req, res) => {
       const payPayload = { id: fullOrder.id, paymentStatus: fullOrder.paymentStatus, paidAt: fullOrder.paidAt };
       emitToVendorHelper(req, vendorIdNum, "order:payment", payPayload);
       emitToUserHelper(req, req.user.id, "order:payment", { ...payPayload, UserId: req.user.id });
-      // push notify
       try {
         await notifyUser(req.user.id, {
           title: `Payment confirmed for Order #${fullOrder.id}`,
@@ -504,7 +498,8 @@ router.post("/", authenticateToken, async (req, res) => {
       details: { items: cleanItems, totalAmount: computedTotal, paymentMethod },
     });
 
-    return res.status(201).json({ message: "Order created", order: fullOrder });
+    // ⬅ return the order directly (shape matches frontend)
+    return res.status(201).json(fullOrder);
   } catch (err) {
     try { await t.rollback(); } catch (_) {}
     console.error("POST /api/orders error:", err?.name, err?.message);
@@ -539,21 +534,19 @@ router.patch("/:id/cancel", authenticateToken, async (req, res) => {
       return res.status(403).json({ message: "Not authorized to cancel this order" });
     }
 
-    if (order.status !== "pending") {
+    if ((order.status || "").toLowerCase() !== "pending") {
       return res.status(400).json({ message: "Only pending orders can be canceled" });
     }
-    if (order.paymentStatus === "paid") {
+    if ((order.paymentStatus || "").toLowerCase() === "paid") {
       return res.status(400).json({ message: "Paid orders cannot be canceled" });
     }
 
     order.status = "canceled";
     await order.save();
 
-    // live updates
     emitToVendorHelper(req, order.VendorId, "order:status", { id: order.id, status: order.status });
     emitToUserHelper(req, order.UserId, "order:status", { id: order.id, status: order.status, UserId: order.UserId });
 
-    // notify
     try {
       const title = `Order #${order.id} is canceled`;
       const body  = `You canceled this order.`;
@@ -563,7 +556,6 @@ router.patch("/:id/cancel", authenticateToken, async (req, res) => {
       console.warn("push notify failed:", e?.message);
     }
 
-    // Audit
     await audit(req, {
       action: "ORDER_CANCELED",
       order,
@@ -602,7 +594,7 @@ router.put("/:id", authenticateToken, async (req, res) => {
   }
 });
 
-// Vendor updates order status (accept / ready / delivered / rejected) — not "canceled"
+/* ----------------- vendor updates order status ----------------- */
 router.patch(
   "/:id/status",
   authenticateToken,
@@ -612,10 +604,10 @@ router.patch(
     try {
       const vendorId = req.vendor.id;
       const { id } = req.params;
-      const { status } = req.body;
+      const statusRaw = String(req.body?.status || "").toLowerCase();
 
       const allowed = ["pending", "accepted", "rejected", "ready", "delivered"];
-      if (!allowed.includes(status)) {
+      if (!allowed.includes(statusRaw)) {
         return res.status(400).json({ message: "Invalid status" });
       }
 
@@ -625,7 +617,7 @@ router.patch(
         return res.status(403).json({ message: "Not your order" });
       }
 
-      order.status = status;
+      order.status = statusRaw;
       await order.save();
 
       // live in-app updates via sockets
@@ -642,11 +634,10 @@ router.patch(
         console.warn("push notify failed:", e?.message);
       }
 
-      // Audit
       await audit(req, {
         action: "ORDER_STATUS_UPDATE",
         order,
-        details: { by: "vendor", newStatus: status },
+        details: { by: "vendor", newStatus: statusRaw },
       });
 
       return res.json({ message: "Status updated", order });
@@ -656,7 +647,7 @@ router.patch(
   }
 );
 
-// (Optional) hard delete — consider restricting to admins only
+/* ----------------- hard delete (restrict as needed) ----------------- */
 router.delete("/:id", authenticateToken, async (req, res) => {
   try {
     const order = await Order.findByPk(req.params.id);
@@ -665,7 +656,6 @@ router.delete("/:id", authenticateToken, async (req, res) => {
     await OrderItem.destroy({ where: { OrderId: order.id } });
     await order.destroy();
 
-    // Audit
     await audit(req, {
       action: "ORDER_DELETED",
       order,
@@ -707,13 +697,10 @@ router.get("/filter", authenticateToken, async (req, res) => {
   }
 });
 
-
 /* ----------------- payment status ----------------- */
-// Vendor/Admin marks payment status (e.g., COD delivered -> paid)
 router.patch("/:id/payment", authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-    // accept either { status } or { paymentStatus }
     const raw = (req.body?.paymentStatus ?? req.body?.status ?? "").toString().toLowerCase();
     const status = raw || "unpaid";
 
@@ -726,12 +713,8 @@ router.patch("/:id/payment", authenticateToken, async (req, res) => {
     if (!order) return res.status(404).json({ message: "Order not found" });
 
     const role = req.user?.role || "user";
-
-    // Figure out if this user is the vendor that owns the order
-    // Prefer req.vendor.id (if middleware filled it), else look up by UserId fallback
     let vendorIdClaim = req.vendor?.id || req.user?.vendorId || null;
     if (!vendorIdClaim && role === "vendor") {
-      // Fallback: find vendor profile for this user
       try {
         const v = await Vendor.findOne({ where: { UserId: req.user.id }, attributes: ["id"] });
         if (v) vendorIdClaim = v.id;
@@ -747,19 +730,16 @@ router.patch("/:id/payment", authenticateToken, async (req, res) => {
         .json({ message: "Not authorized to update payment for this order" });
     }
 
-    // Do not allow payment updates on canceled/rejected
     if (["canceled", "cancelled", "rejected"].includes((order.status || "").toLowerCase())) {
       return res
         .status(400)
         .json({ message: `Cannot set payment on a ${order.status} order` });
     }
 
-    // Update and persist
     order.paymentStatus = status;
     order.paidAt = status === "paid" ? new Date() : null;
     await order.save();
 
-    // live updates
     emitToVendorHelper(req, order.VendorId, "order:payment", {
       id: order.id,
       paymentStatus: order.paymentStatus,
@@ -772,7 +752,6 @@ router.patch("/:id/payment", authenticateToken, async (req, res) => {
       UserId: order.UserId,
     });
 
-    // push notify
     try {
       const title = `Payment ${status} for Order #${order.id}`;
       const body =
@@ -787,7 +766,6 @@ router.patch("/:id/payment", authenticateToken, async (req, res) => {
       console.warn("push notify failed:", e?.message);
     }
 
-    // Audit
     await audit(req, {
       action: "ORDER_PAYMENT_UPDATE",
       order,
@@ -799,6 +777,7 @@ router.patch("/:id/payment", authenticateToken, async (req, res) => {
     return res.status(500).json({ message: "Failed to update payment", error: err.message });
   }
 });
+
 /* ----------------- invoice helpers + routes ----------------- */
 async function buildInvoiceHtml(order) {
   const escapeHtml = (s = "") =>
@@ -812,7 +791,6 @@ async function buildInvoiceHtml(order) {
   const fmtINR = (n) => `₹${Number(n || 0).toFixed(2)}`;
   const LOGO = process.env.INVOICE_LOGO_URL || "";
 
-  // Support both OrderItems include and MenuItems include
   const items = Array.isArray(order.MenuItems) && order.MenuItems.length
     ? order.MenuItems.map(mi => ({ name: mi.name, price: mi.price, qty: mi?.OrderItem?.quantity || 1 }))
     : Array.isArray(order.OrderItems) && order.OrderItems.length
@@ -872,7 +850,7 @@ async function buildInvoiceHtml(order) {
   <div class="wrap">
     <header>
       <div class="brand">
-        ${LOGO ? `<img src="${escapeHtml(LOGO)}" alt="Logo" />` : ""}
+        ${process.env.INVOICE_LOGO_URL ? `<img src="${process.env.INVOICE_LOGO_URL}" alt="Logo" />` : ""}
         <div>
           <h1>Tax Invoice</h1>
           <div class="muted">Order #${order.id}</div>
@@ -936,14 +914,13 @@ async function buildInvoiceHtml(order) {
 </html>`;
 }
 
-/* ----------------- HTML invoice (download/print from UI) ----------------- */
+/* ----------------- HTML invoice ----------------- */
 router.get("/:id/invoice", authenticateToken, async (req, res) => {
   try {
     const order = await Order.findByPk(req.params.id, {
       include: [
         { model: User,   attributes: ["name", "email"] },
         { model: Vendor, attributes: ["name", "cuisine"] },
-        // include both shapes for safety
         { model: MenuItem, attributes: ["name", "price"], through: { attributes: ["quantity"] } },
         { model: OrderItem, include: [{ model: MenuItem, attributes: ["name", "price"] }] },
       ],
