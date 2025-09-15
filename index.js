@@ -10,35 +10,43 @@ const compression = require("compression");
 const morgan = require("morgan");
 const path = require("path");
 
-
-
 // ---- DB ----
 const db = require("./models");
 
 // ---- App ----
 const app = express();
 
-// Allowed frontend origins (env first, fallback to known hosts)
+// ---- Allowed frontend origins ----
 const DEFAULT_ORIGINS = [
   "https://servezy.in",
   "https://www.servezy.in",
-  "https://glistening-taffy-7be8bf.netlify.app",
+  "https://glistening-taffy-7be8bf.netlify.app", // your current Netlify
   "http://localhost:3000",
+  "http://localhost:5173", // vite
 ];
-const FRONTENDS = (process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(",") : DEFAULT_ORIGINS)
+const FRONTENDS_LIST = (process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(",") : DEFAULT_ORIGINS)
   .map((s) => s.trim())
   .filter(Boolean);
 
-// Trust proxy (Render/Heroku/NGINX) so websocket upgrade works well
+// helper: allow *.netlify.app previews & localhost
+const isAllowedOrigin = (origin) => {
+  if (!origin) return true; // same-origin / curl / health checks
+  if (FRONTENDS_LIST.includes(origin)) return true;
+  try {
+    const u = new URL(origin);
+    if (u.hostname.endsWith(".netlify.app")) return true;
+    if (u.hostname === "localhost") return true;
+  } catch {}
+  return false;
+};
+
+// Trust proxy (Render/Heroku/NGINX) so websocket upgrade works
 app.set("trust proxy", 1);
 
 // ---- Security & Middleware ----
 app.use(
   cors({
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // health checks / curl / same-origin
-      return FRONTENDS.includes(origin) ? cb(null, true) : cb(new Error("Not allowed by CORS"));
-    },
+    origin: (origin, cb) => (isAllowedOrigin(origin) ? cb(null, true) : cb(new Error("Not allowed by CORS"))),
     credentials: true,
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS",
     allowedHeaders: "Content-Type, Authorization, X-Requested-With, Idempotency-Key",
@@ -60,7 +68,7 @@ app.use(express.urlencoded({ extended: true, limit: "250kb" }));
 
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
-// Rate limits
+// ---- Rate limits ----
 app.use(
   "/api/",
   rateLimit({
@@ -82,27 +90,29 @@ app.use(
 
 // ---- HTTP server + Socket.IO (single instance) ----
 const server = http.createServer(app);
+
 const io = new Server(server, {
-  path: "/socket.io",
+  path: "/socket.io", // <-- keep this in sync with client
   cors: {
-    origin: FRONTENDS,
-    methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
+    origin: (origin, cb) => (isAllowedOrigin(origin) ? cb(null, true) : cb(new Error("Not allowed by CORS"))),
     credentials: true,
+    methods: ["GET", "POST"],
   },
   pingInterval: 25000,
   pingTimeout: 60000,
-  allowEIO3: true,
+  allowEIO3: true, // ok if any older clients
+});
+
+// simple auth hook (optional)
+io.use((socket, next) => {
+  // const token = socket.handshake.auth?.token || (socket.handshake.headers.authorization || '').replace(/^Bearer\s+/i,'');
+  // TODO: verify token if you want
+  next();
 });
 
 // socket helpers exposed to routes
-const emitToVendor = (vendorId, event, payload) => {
-  if (!vendorId) return;
-  io.to(`vendor:${vendorId}`).emit(event, payload);
-};
-const emitToUser = (userId, event, payload) => {
-  if (!userId) return;
-  io.to(`user:${userId}`).emit(event, payload);
-};
+const emitToVendor = (vendorId, event, payload) => vendorId && io.to(`vendor:${vendorId}`).emit(event, payload);
+const emitToUser = (userId, event, payload) => userId && io.to(`user:${userId}`).emit(event, payload);
 app.set("io", io);
 app.set("emitToVendor", emitToVendor);
 app.set("emitToUser", emitToUser);
@@ -110,13 +120,10 @@ app.set("emitToUser", emitToUser);
 // Rooms
 io.on("connection", (socket) => {
   console.log("🔌 socket connected", socket.id);
+  socket.emit("connected", { id: socket.id });
 
   socket.on("vendor:join", (vendorId) => vendorId && socket.join(`vendor:${vendorId}`));
   socket.on("user:join", (userId) => userId && socket.join(`user:${userId}`));
-
-  socket.on("auth:refresh", () => {
-    // add token checks here if needed
-  });
 
   socket.on("disconnect", (reason) => {
     console.log("🔌 socket disconnected:", reason);
@@ -146,28 +153,20 @@ try {
   }
 }
 
-const mountSafe = (path, router) => {
-  if (router && typeof router === "function") {
-    app.use(path, router);
-  } else {
-    console.warn(`⚠️  Skipped mounting ${path} — handler not a function.`);
-  }
-};
-const mountWithEmit = (path, router) => {
-  if (router && typeof router === "function") {
-    app.use(
-      path,
-      (req, _res, next) => {
-        req.emitToVendor = emitToVendor;
-        req.emitToUser = emitToUser;
-        next();
-      },
-      router
-    );
-  } else {
-    console.warn(`⚠️  Skipped mounting ${path} — handler not a function.`);
-  }
-};
+// mount helpers
+const mountSafe = (p, r) => (r && typeof r === "function" ? app.use(p, r) : console.warn(`⚠️  Skipped mounting ${p}`));
+const mountWithEmit = (p, r) =>
+  r && typeof r === "function"
+    ? app.use(
+        p,
+        (req, _res, next) => {
+          req.emitToVendor = emitToVendor;
+          req.emitToUser = emitToUser;
+          next();
+        },
+        r
+      )
+    : console.warn(`⚠️  Skipped mounting ${p}`);
 
 mountSafe("/api/auth", authRoutes);
 mountSafe("/api/vendors", vendorRoutes);
@@ -176,15 +175,14 @@ mountWithEmit("/api/orders", orderRoutes);
 mountSafe("/api/push", pushRoutes);
 mountSafe("/api/admin", adminRoutes);
 mountSafe("/api/uploads", uploadRoutes);
-if (paymentsRouter) mountWithEmit("/api/payments", paymentsRouter); // mount once
+if (paymentsRouter) mountWithEmit("/api/payments", paymentsRouter);
 
 // Public key endpoint
-app.get("/public-key", (_req, res) => {
-  res.json({ publicKey: VAPID_PUBLIC_KEY || "" });
-});
+app.get("/public-key", (_req, res) => res.json({ publicKey: VAPID_PUBLIC_KEY || "" }));
 
-// Health & root
+// Health
 app.get("/ping", (_req, res) => res.send("pong"));
+app.get("/healthz", (_req, res) => res.status(200).send("ok"));
 app.get("/", (_req, res) => res.send("✅ Cloud Kitchen Backend is live!"));
 
 // 404 fallback (after all routes)
@@ -202,6 +200,10 @@ app.use((err, req, res, _next) => {
 // ---- Start ----
 const PORT = process.env.PORT || 5000;
 
+// help proxies keep connections alive a bit longer
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
+
 db.sequelize
   .sync({ alter: true })
   .then(async () => {
@@ -212,7 +214,7 @@ db.sequelize
     } catch {}
     server.listen(PORT, () => {
       console.log(`🚀 Server (HTTP + Socket.IO) listening on port ${PORT}`);
-      console.log("🌐 Allowed origins:", FRONTENDS.join(", "));
+      console.log("🌐 Allowed origins:", FRONTENDS_LIST.join(", "), " + *.netlify.app + localhost");
       console.log("✅ Connecting to database:", process.env.DB_NAME);
     });
   })
