@@ -25,6 +25,7 @@
     "firebase-admin": "^13.4.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
+    "lodash": "^4.17.21",
     "morgan": "^1.10.1",
     "multer": "^2.0.2",
     "pg": "^8.16.3",
@@ -42,5 +43,8 @@
   "bugs": {
     "url": "https://github.com/rufus0077353/cloud-kitchen-backend/issues"
   },
-  "homepage": "https://github.com/rufus0077353/cloud-kitchen-backend#readme"
+  "homepage": "https://github.com/rufus0077353/cloud-kitchen-backend#readme",
+  "devDependencies": {
+    "sequelize-cli": "^6.6.3"
+  }
 }
