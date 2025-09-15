@@ -85,6 +85,37 @@ async function safeCreateIdempotencyKey(record, t) {
   }
 }
 
+// ---- unified filter handler (works for GET ?query and POST body) ----
+async function filterHandler(req, res) {
+  const src = req.method === "GET" ? req.query : req.body;
+  const { UserId, VendorId, status, startDate, endDate } = src;
+
+  const where = {};
+  if (UserId) where.UserId = UserId;
+  if (VendorId) where.VendorId = VendorId;
+  if (status) where.status = status;
+  if (startDate || endDate) {
+    where.createdAt = {};
+    if (startDate) where.createdAt[Op.gte] = new Date(startDate);
+    if (endDate)   where.createdAt[Op.lte] = new Date(endDate);
+  }
+
+  try {
+    const orders = await Order.findAll({
+      where,
+      include: [
+        { model: User, attributes: ["id", "name", "email"] },
+        { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] }, // include commissionRate
+        { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
+      ],
+      order: [["createdAt", "DESC"]],
+    });
+    return res.json({ items: orders });
+  } catch (err) {
+    return res.status(500).json({ message: "Error filtering orders", error: err.message });
+  }
+}
+
 /* ----------------- user orders (optionally paginated) ----------------- */
 router.get("/my", authenticateToken, async (req, res) => {
   try {
@@ -975,7 +1006,7 @@ router.get("/admin", authenticateToken, async (req, res) => {
     if (req.user?.role !== "admin") return res.status(403).json({ message: "Admin only" });
 
     const { page = 1, pageSize = 20, status, paymentStatus, vendorId, userId } = req.query;
-    const p = Math.max(1, Number(page) || 1);
+    const p  = Math.max(1, Number(page) || 1);
     const ps = Math.min(100, Math.max(1, Number(pageSize) || 20));
 
     const where = {};
@@ -987,7 +1018,7 @@ router.get("/admin", authenticateToken, async (req, res) => {
     const { count, rows } = await Order.findAndCountAll({
       where,
       include: [
-        { model: Vendor, attributes: ["id", "name", "commissionRate"] }, // include rate here too
+        { model: Vendor, attributes: ["id", "name", "commissionRate"] },
         { model: User,   attributes: ["id", "name", "email"] },
       ],
       order: [["createdAt", "DESC"]],
@@ -995,11 +1026,18 @@ router.get("/admin", authenticateToken, async (req, res) => {
       offset: (p - 1) * ps,
     });
 
-    const items = rows.map(o => ({
-      ...o.toJSON(),
-      commissionAmount: +(Number(o.totalAmount || 0) * (o.Vendor?.commissionRate ?? COMMISSION_PCT)).toFixed(2),
-      commissionRate: (o.Vendor?.commissionRate ?? COMMISSION_PCT),
-    }));
+    const items = rows.map((o) => {
+      const rate = (o.Vendor && o.Vendor.commissionRate != null)
+        ? Number(o.Vendor.commissionRate)
+        : Number(process.env.COMMISSION_PCT || 0.15);
+      const gross = Number(o.totalAmount || 0);
+      const commissionAmount = +(gross * rate).toFixed(2);
+      return {
+        ...o.toJSON(),
+        commissionAmount,
+        commissionRate: rate,
+      };
+    });
 
     return res.json({
       items,
@@ -1012,5 +1050,4 @@ router.get("/admin", authenticateToken, async (req, res) => {
     return res.status(500).json({ message: "Failed to fetch admin orders", error: err.message });
   }
 });
-
 module.exports = router;
