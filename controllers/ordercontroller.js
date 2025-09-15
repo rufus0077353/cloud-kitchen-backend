@@ -1,24 +1,25 @@
-
 const db = require("../models");
 const { Order, OrderItem, MenuItem, Vendor, User } = db;
 const { Op } = require("sequelize");
 
+/* ---------------- Create ---------------- */
 exports.createOrder = async (req, res) => {
   try {
     const { UserId, VendorId, totalAmount, items } = req.body;
 
     if (!UserId || !VendorId || !totalAmount || !items?.length) {
-      return res.status(400).json({ message: "UserId, VendorId, totalAmount, and items are required" });
+      return res
+        .status(400)
+        .json({ message: "UserId, VendorId, totalAmount, and items are required" });
     }
 
     const order = await Order.create({ UserId, VendorId, totalAmount });
 
-    const orderItems = items.map(item => ({
+    const orderItems = items.map((item) => ({
       OrderId: order.id,
       MenuItemId: item.MenuItemId,
       quantity: item.quantity,
     }));
-
     await OrderItem.bulkCreate(orderItems);
 
     res.status(201).json({ message: "Order created", order });
@@ -27,12 +28,14 @@ exports.createOrder = async (req, res) => {
   }
 };
 
+/* ---------------- My orders (user) ---------------- */
 exports.getMyOrders = async (req, res) => {
   try {
     const orders = await Order.findAll({
       where: { UserId: req.user.id },
       include: [
-        { model: Vendor, attributes: ["id", "name", "cuisine"] },
+        // ⬇️ include commissionRate
+        { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
         {
           model: MenuItem,
           attributes: ["id", "name", "price"],
@@ -47,6 +50,7 @@ exports.getMyOrders = async (req, res) => {
   }
 };
 
+/* ---------------- Vendor orders (open endpoint by vendorId) ---------------- */
 exports.getVendorOrders = async (req, res) => {
   try {
     const vendorId = req.params.vendorId;
@@ -55,6 +59,7 @@ exports.getVendorOrders = async (req, res) => {
       where: { VendorId: vendorId },
       include: [
         { model: User, attributes: ["id", "name", "email"] },
+        { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
         {
           model: MenuItem,
           attributes: ["id", "name", "price"],
@@ -69,26 +74,28 @@ exports.getVendorOrders = async (req, res) => {
   }
 };
 
+/* ---------------- Vendor orders (secure, via middleware) ---------------- */
 exports.getVendorOrdersSecure = async (req, res) => {
   try {
-    const { Order, OrderItem, MenuItem, User } = require("../models");
     const vendorId = req.vendor.id; // set by ensureVendorProfile middleware
 
     const orders = await Order.findAll({
       where: { VendorId: vendorId },
       include: [
         { model: User, attributes: ["id", "name", "email"] },
-        { model: OrderItem, include: [{ model: MenuItem, attributes: ["id","name","price"] }] }
+        { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
+        { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
       ],
       order: [["createdAt", "DESC"]],
     });
 
-    res.json(orders); // must be an array
+    res.json(orders);
   } catch (err) {
     res.status(500).json({ message: "Failed to fetch vendor orders", error: err.message });
   }
 };
 
+/* ---------------- Update order (amount/items) ---------------- */
 exports.updateOrder = async (req, res) => {
   const { id } = req.params;
   const { totalAmount, items } = req.body;
@@ -97,18 +104,17 @@ exports.updateOrder = async (req, res) => {
     const order = await Order.findByPk(id);
     if (!order) return res.status(404).json({ message: "Order not found" });
 
-    if (totalAmount) order.totalAmount = totalAmount;
+    if (totalAmount !== undefined) order.totalAmount = totalAmount;
     await order.save();
 
     if (items?.length) {
       await OrderItem.destroy({ where: { OrderId: id } });
 
-      const orderItems = items.map(item => ({
+      const orderItems = items.map((item) => ({
         OrderId: id,
         MenuItemId: item.MenuItemId,
         quantity: item.quantity,
       }));
-
       await OrderItem.bulkCreate(orderItems);
     }
 
@@ -118,6 +124,7 @@ exports.updateOrder = async (req, res) => {
   }
 };
 
+/* ---------------- Delete order ---------------- */
 exports.deleteOrder = async (req, res) => {
   try {
     const order = await Order.findByPk(req.params.id);
@@ -132,25 +139,29 @@ exports.deleteOrder = async (req, res) => {
   }
 };
 
+/* ---------------- Filter (Admin) — supports GET or POST; returns {items: []} ---------------- */
 exports.filterOrders = async (req, res) => {
-  const { UserId, VendorId, status, startDate, endDate } = req.query;
+  // allow both GET (query) and POST (body) — matches your frontend
+  const src = req.method === "GET" ? req.query : req.body;
+  const { UserId, VendorId, status, startDate, endDate } = src;
 
-  const whereClause = {};
-  if (UserId) whereClause.UserId = UserId;
-  if (VendorId) whereClause.VendorId = VendorId;
-  if (status) whereClause.status = status;
+  const where = {};
+  if (UserId) where.UserId = UserId;
+  if (VendorId) where.VendorId = VendorId;
+  if (status) where.status = status;
   if (startDate || endDate) {
-    whereClause.createdAt = {};
-    if (startDate) whereClause.createdAt[Op.gte] = new Date(startDate);
-    if (endDate) whereClause.createdAt[Op.lte] = new Date(endDate);
+    where.createdAt = {};
+    if (startDate) where.createdAt[Op.gte] = new Date(startDate);
+    if (endDate) where.createdAt[Op.lte] = new Date(endDate);
   }
 
   try {
     const orders = await Order.findAll({
-      where: whereClause,
+      where,
       include: [
         { model: User, attributes: ["id", "name", "email"] },
-        { model: Vendor, attributes: ["id", "name", "cuisine"] },
+        // ⬇️ KEY: include commissionRate so the UI won’t fall back to 15%
+        { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
         {
           model: MenuItem,
           attributes: ["id", "name", "price"],
@@ -160,32 +171,17 @@ exports.filterOrders = async (req, res) => {
       order: [["createdAt", "DESC"]],
     });
 
-    res.json(orders);
+    // Return in a shape the UI already accepts
+    res.json({ items: orders });
   } catch (err) {
     res.status(500).json({ message: "Error filtering orders", error: err.message });
   }
 };
 
-exports.getInvoice = async (req, res) => {
-  try {
-    const order = await Order.findByPk(req.params.id, {
-      include: [
-        { model: User, attributes: ["name", "email"] },
-        { model: Vendor, attributes: ["name", "cuisine"] },
-        {
-          model: MenuItem,
-          attributes: ["name", "price"],
-          through: { attributes: ["quantity"] },
-        },
-      ],
-    });
-
-    if (!order) return res.status(404).json({ message: "Order not found" });
-
-// ✅ ADD THIS EXACT FUNCTION (anywhere among exports—top or bottom is fine)
+/* ---------------- Update order status (vendor-owned) ---------------- */
 exports.updateOrderStatus = async (req, res) => {
   try {
-    const vendorId = req.vendor.id;          // set by ensureVendorProfile
+    const vendorId = req.vendor?.id; // set by ensureVendorProfile middleware
     const { id } = req.params;
     const { status } = req.body;
 
@@ -196,7 +192,7 @@ exports.updateOrderStatus = async (req, res) => {
 
     const order = await Order.findByPk(id);
     if (!order) return res.status(404).json({ message: "Order not found" });
-    if (order.VendorId !== vendorId) {
+    if (vendorId && order.VendorId !== vendorId) {
       return res.status(403).json({ message: "Not your order" });
     }
 
@@ -208,19 +204,36 @@ exports.updateOrderStatus = async (req, res) => {
   }
 };
 
+/* ---------------- Invoice ---------------- */
+exports.getInvoice = async (req, res) => {
+  try {
+    const order = await Order.findByPk(req.params.id, {
+      include: [
+        { model: User, attributes: ["name", "email"] },
+        { model: Vendor, attributes: ["name", "cuisine", "commissionRate"] },
+        {
+          model: MenuItem,
+          attributes: ["name", "price"],
+          through: { attributes: ["quantity"] },
+        },
+      ],
+    });
+
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
     const html = `
       <h2>Invoice for Order #${order.id}</h2>
       <p><strong>User:</strong> ${order.User.name} (${order.User.email})</p>
       <p><strong>Vendor:</strong> ${order.Vendor.name} (${order.Vendor.cuisine})</p>
       <ul>
-        ${order.MenuItems.map(item =>
-          `<li>${item.name} (x${item.OrderItem.quantity}) - ₹${item.price}</li>`
+        ${order.MenuItems.map(
+          (item) =>
+            `<li>${item.name} (x${item.OrderItem.quantity}) - ₹${item.price}</li>`
         ).join("")}
       </ul>
       <p><strong>Status:</strong> ${order.status}</p>
       <p><strong>Total Amount:</strong> ₹${order.totalAmount}</p>
     `;
-
     res.send(html);
   } catch (err) {
     res.status(500).json({ message: "Error generating invoice", error: err.message });
