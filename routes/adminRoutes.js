@@ -1,89 +1,82 @@
 
-// adminRoutes.js
+// routes/adminRoutes.js
 const express = require("express");
 const router = express.Router();
 const bcrypt = require("bcrypt");
-const { User, Vendor, Order, MenuItem } = require("../models");
-const { authenticateToken, requireAdmin } = require("../middleware/authMiddleware");
 const { Op, Sequelize } = require("sequelize");
 
-// 15% default platform rate unless overridden per vendor
+const { User, Vendor, Order, MenuItem } = require("../models");
+const { authenticateToken, requireAdmin } = require("../middleware/authMiddleware");
+
+// ---------- config ----------
 const DEFAULT_PLATFORM_RATE = Number(process.env.PLATFORM_RATE || 0.15);
+const NON_REVENUE_STATUSES = ["rejected", "canceled", "cancelled"];
 
-/* ----------------- helpers ----------------- */
-function normalizeOrderFilters(req) {
-  const src = req.method === "GET" ? (req.query || {}) : (req.body || {});
-  const val = (a, b) => (src[a] ?? src[b] ?? "").toString().trim();
-
-  const UserId   = val("UserId",   "userId");
-  const VendorId = val("VendorId", "vendorId");
-  const status   = val("status",   "Status");
-
-  const startRaw = val("startDate", "From");
-  const endRaw   = val("endDate",   "To");
-
-  const where = {};
-  if (UserId)   where.UserId   = Number(UserId);
-  if (VendorId) where.VendorId = Number(VendorId);
-  if (status)   where.status   = status;
-
-  if (startRaw || endRaw) {
-    where.createdAt = {};
-    if (startRaw) where.createdAt[Op.gte] = new Date(startRaw);
-    if (endRaw)   where.createdAt[Op.lte] = new Date(endRaw);
-  }
-  return where;
-}
-
+// ---------- helpers ----------
 const money = (n) => Number((Number(n || 0)).toFixed(2));
+const toNum = (v, d = null) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+};
+const parsePage = (q) => {
+  const page = Math.max(1, toNum(q.page, 1));
+  const pageSize = Math.min(100, Math.max(1, toNum(q.pageSize, 20)));
+  return { page, pageSize };
+};
+const like = (field, q) => (q ? { [field]: { [Op.iLike]: `%${q}%` } } : null);
+
 const commissionFor = (orderPlain) => {
   const total = Number(orderPlain?.totalAmount || 0);
   const rate =
     orderPlain?.Vendor?.commissionRate != null
       ? Number(orderPlain.Vendor.commissionRate)
       : DEFAULT_PLATFORM_RATE;
-  return money(total * (isFinite(rate) ? rate : DEFAULT_PLATFORM_RATE));
+  return money(total * (Number.isFinite(rate) ? rate : DEFAULT_PLATFORM_RATE));
 };
 
-/* ----------------- overview (adds commission totals) ----------------- */
+// ======================================================
+//  OVERVIEW  →  /api/admin/overview
+// ======================================================
 router.get("/overview", authenticateToken, requireAdmin, async (_req, res) => {
   try {
-    const [totalUsers, totalVendors, totalOrders, totalRevenueRaw] = await Promise.all([
+    const [users, vendors, orders] = await Promise.all([
       User.count(),
       Vendor.count(),
       Order.count(),
-      Order.sum("totalAmount"),
     ]);
 
-    const paidWhere = {
-      paymentStatus: "paid",
-      status: { [Op.notIn]: ["rejected", "canceled", "cancelled"] },
-    };
-
+    // lifetime paid & non-canceled revenue
     const paidOrders = await Order.findAll({
-      where: paidWhere,
+      where: { paymentStatus: "paid", status: { [Op.notIn]: NON_REVENUE_STATUSES } },
       include: [{ model: Vendor, attributes: ["id", "commissionRate"] }],
       attributes: ["id", "totalAmount", "VendorId", "createdAt"],
-      order: [["createdAt", "DESC"]],
       raw: true,
       nest: true,
     });
 
-    const totalCommission = paidOrders.reduce((sum, o) => sum + commissionFor(o), 0);
+    const totalRevenue = money(
+      paidOrders.reduce((s, o) => s + Number(o.totalAmount || 0), 0)
+    );
+    const totalCommission = money(paidOrders.reduce((s, o) => s + commissionFor(o), 0));
 
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const monthCommission = paidOrders
-      .filter((o) => new Date(o.createdAt) >= monthStart)
-      .reduce((sum, o) => sum + commissionFor(o), 0);
+    const monthCommission = money(
+      paidOrders
+        .filter((o) => new Date(o.createdAt) >= monthStart)
+        .reduce((s, o) => s + commissionFor(o), 0)
+    );
 
     res.json({
-      totalUsers,
-      totalVendors,
-      totalOrders,
-      totalRevenue: money(totalRevenueRaw || 0),
-      totalCommission: money(totalCommission),
-      monthCommission: money(monthCommission),
+      totals: {
+        users,
+        vendors,
+        orders,
+        revenue: totalRevenue,
+        commission: totalCommission,
+        commissionThisMonth: monthCommission,
+      },
+      rate: DEFAULT_PLATFORM_RATE,
     });
   } catch (err) {
     console.error("overview error:", err);
@@ -91,16 +84,41 @@ router.get("/overview", authenticateToken, requireAdmin, async (_req, res) => {
   }
 });
 
-/* ----------------- users ----------------- */
-router.get("/users", authenticateToken, requireAdmin, async (_req, res) => {
+// ======================================================
+//  USERS (paginated)  →  /api/admin/users
+//    q, role, status, page, pageSize
+// ======================================================
+router.get("/users", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const users = await User.findAll({ attributes: ["id", "name", "email", "role"] });
-    res.json(users);
+    const { page, pageSize } = parsePage(req.query);
+    const where = {};
+    if (req.query.role) where.role = req.query.role;
+    if (req.query.status) where.status = req.query.status;
+    if (req.query.q) {
+      where[Op.or] = [like("name", req.query.q), like("email", req.query.q)].filter(Boolean);
+    }
+
+    const { count, rows } = await User.findAndCountAll({
+      where,
+      attributes: ["id", "name", "email", "role", "status", "createdAt"],
+      order: [["id", "ASC"]],
+      limit: pageSize,
+      offset: (page - 1) * pageSize,
+    });
+
+    res.json({
+      items: rows,
+      total: count,
+      page,
+      pageSize,
+      totalPages: Math.ceil(count / pageSize),
+    });
   } catch (err) {
     res.status(500).json({ message: "Users fetch failed", error: err.message });
   }
 });
 
+// Create / Update / Delete users (unchanged APIs)
 router.post("/users", authenticateToken, requireAdmin, async (req, res) => {
   const { name, email, password, role } = req.body || {};
   if (!name || !email || !password || !role) {
@@ -109,7 +127,6 @@ router.post("/users", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const exists = await User.findOne({ where: { email } });
     if (exists) return res.status(409).json({ message: "Email already in use" });
-
     const user = await User.create({ name, email, password, role });
     res.status(201).json({ message: "User created", user });
   } catch (err) {
@@ -122,12 +139,10 @@ router.put("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
     const { name, email, password, role } = req.body || {};
     const user = await User.findByPk(req.params.id);
     if (!user) return res.status(404).json({ message: "User not found" });
-
-    user.name = name || user.name;
-    user.email = email || user.email;
-    user.role = role || user.role;
+    user.name = name ?? user.name;
+    user.email = email ?? user.email;
+    user.role = role ?? user.role;
     if (password) user.password = await bcrypt.hash(password, 10);
-
     await user.save();
     res.json({ message: "User updated successfully", user });
   } catch (err) {
@@ -146,31 +161,58 @@ router.delete("/users/:id", authenticateToken, requireAdmin, async (req, res) =>
   }
 });
 
-/* ----------------- promote ----------------- */
 router.put("/promote/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const user = await User.findByPk(req.params.id);
     if (!user) return res.status(404).json({ message: "User not found" });
-
     user.role = "vendor";
     await user.save();
-
     res.json({ message: "User promoted to vendor successfully", user });
   } catch (err) {
     res.status(500).json({ message: "Failed to promote user", error: err.message });
   }
 });
 
-/* ----------------- vendors (with commission) ----------------- */
-router.get("/vendors", authenticateToken, requireAdmin, async (_req, res) => {
+// ======================================================
+//  VENDORS (paginated)  →  /api/admin/vendors
+//    q, status=open|closed, userId, page, pageSize
+// ======================================================
+router.get("/vendors", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const vendors = await Vendor.findAll();
-    res.json(vendors);
+    const { page, pageSize } = parsePage(req.query);
+    const where = {};
+    if (req.query.status === "open") where.isOpen = true;
+    if (req.query.status === "closed") where.isOpen = false;
+    if (req.query.userId) where.UserId = toNum(req.query.userId);
+
+    if (req.query.q) {
+      where[Op.or] = [
+        like("name", req.query.q),
+        like("location", req.query.q),
+        like("cuisine", req.query.q),
+      ].filter(Boolean);
+    }
+
+    const { count, rows } = await Vendor.findAndCountAll({
+      where,
+      order: [["createdAt", "DESC"]],
+      limit: pageSize,
+      offset: (page - 1) * pageSize,
+    });
+
+    res.json({
+      items: rows,
+      total: count,
+      page,
+      pageSize,
+      totalPages: Math.ceil(count / pageSize),
+    });
   } catch (err) {
     res.status(500).json({ message: "Vendors fetch failed", error: err.message });
   }
 });
 
+// Create / Update / Delete vendors
 router.post("/vendors", authenticateToken, requireAdmin, async (req, res) => {
   const { name, cuisine, location, UserId, isOpen, commissionRate } = req.body || {};
   if (!name || !cuisine) return res.status(400).json({ message: "Name and cuisine are required" });
@@ -182,32 +224,29 @@ router.post("/vendors", authenticateToken, requireAdmin, async (req, res) => {
       location: location ?? "",
       UserId: UserId ?? null,
       isOpen: typeof isOpen === "boolean" ? isOpen : true,
-      commissionRate: commissionRate != null ? Number(commissionRate) : DEFAULT_PLATFORM_RATE,
+      commissionRate:
+        commissionRate != null ? Number(commissionRate) : DEFAULT_PLATFORM_RATE,
     });
-    res.status(201).json({ message: "Vendor created", newVendor });
+    res.status(201).json({ message: "Vendor created", vendor: newVendor });
   } catch (err) {
     res.status(500).json({ message: "Vendor creation failed", error: err.message });
   }
 });
 
-// routes/admin.js (vendors PUT route)
 router.put("/vendors/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const vendor = await Vendor.findByPk(req.params.id);
     if (!vendor) return res.status(404).json({ message: "Vendor not found" });
 
     const { name, cuisine, location, UserId, isOpen, commissionRate } = req.body || {};
-
     if (name != null) vendor.name = name;
     if (cuisine != null) vendor.cuisine = cuisine;
     if (location != null) vendor.location = location;
     if (UserId != null) vendor.UserId = UserId;
     if (typeof isOpen === "boolean") vendor.isOpen = isOpen;
-
     if (commissionRate != null && commissionRate !== "") {
       let rateNum = Number(commissionRate);
-      // 👇 normalize if someone passed 15 (percent)
-      if (rateNum > 1) rateNum = rateNum / 100;
+      if (rateNum > 1) rateNum = rateNum / 100; // allow "15" to mean 15%
       vendor.commissionRate = rateNum;
     }
 
@@ -229,92 +268,96 @@ router.delete("/vendors/:id", authenticateToken, requireAdmin, async (req, res) 
   }
 });
 
-/** Bulk set commission rate for ALL vendors (use carefully)
- *  Body: { value: 0.15 }  // 15%
- */
-router.patch("/vendors/commission-bulk", authenticateToken, requireAdmin, async (req, res) => {
+// Quick vendor filter list used by UI chips/search
+router.get("/filter", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const value = Number(req.body?.value);
-    if (!Number.isFinite(value) || value < 0 || value > 1) {
-      return res.status(400).json({ message: "Provide a decimal between 0 and 1, e.g. 0.15 for 15%" });
+    const where = {};
+    if (req.query.status === "open") where.isOpen = true;
+    if (req.query.status === "closed") where.isOpen = false;
+    if (req.query.q) {
+      where[Op.or] = [
+        like("name", req.query.q),
+        like("location", req.query.q),
+        like("cuisine", req.query.q),
+      ].filter(Boolean);
     }
-    const [count] = await Vendor.update({ commissionRate: value }, { where: {} });
-    res.json({ message: `Updated commissionRate for ${count} vendors`, value });
+    const vendors = await Vendor.findAll({
+      where,
+      attributes: ["id", "name", "location", "cuisine", "isOpen", "commissionRate"],
+      order: [["createdAt", "DESC"]],
+      limit: 200,
+    });
+    res.json(vendors);
   } catch (err) {
-    res.status(500).json({ message: "Bulk commission update failed", error: err.message });
+    res.status(500).json({ message: "Failed to filter vendors", error: err.message });
   }
 });
 
-/** Set commission only where it's missing (null) */
-router.patch("/vendors/commission-missing", authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const value = Number(req.body?.value ?? DEFAULT_PLATFORM_RATE);
-    const [count] = await Vendor.update(
-      { commissionRate: value },
-      { where: { commissionRate: { [Op.is]: null } } }
-    );
-    res.json({ message: `Set commissionRate=${value} for ${count} vendors that were null` });
-  } catch (err) {
-    res.status(500).json({ message: "Commission patch failed", error: err.message });
-  }
-});
-
-/* ----------------- orders (admin filters + commission) ----------------- */
+// ======================================================
+//  ORDERS (paginated)  →  /api/admin/orders
+//    page, pageSize, status, paymentStatus, vendorId, userId, from, to
+// ======================================================
 router.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const where = normalizeOrderFilters(req);
+    const { page, pageSize } = parsePage(req.query);
 
-    const orders = await Order.findAll({
+    const where = {};
+    if (req.query.status) where.status = req.query.status;
+    if (req.query.paymentStatus) where.paymentStatus = req.query.paymentStatus;
+    if (req.query.vendorId) where.VendorId = toNum(req.query.vendorId);
+    if (req.query.userId) where.UserId = toNum(req.query.userId);
+
+    if (req.query.from || req.query.to) {
+      where.createdAt = {};
+      if (req.query.from) where.createdAt[Op.gte] = new Date(req.query.from);
+      if (req.query.to) where.createdAt[Op.lte] = new Date(req.query.to);
+    }
+
+    const { count, rows } = await Order.findAndCountAll({
       where,
       include: [
-        { model: User,   attributes: ["id", "name", "email"] },
-        { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
-        { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
+        { model: Vendor, attributes: ["id", "name", "commissionRate"] },
+        { model: User, attributes: ["id", "name", "email"] },
       ],
       order: [["createdAt", "DESC"]],
+      limit: pageSize,
+      offset: (page - 1) * pageSize,
     });
 
-    const data = orders.map((o) => {
+    const items = rows.map((o) => {
       const plain = o.toJSON();
-      plain.commission = commissionFor(plain);
-      return plain;
+      const total = Number(plain.totalAmount || 0);
+      const rate =
+        plain?.Vendor?.commissionRate != null
+          ? Number(plain.Vendor.commissionRate)
+          : DEFAULT_PLATFORM_RATE;
+      const commissionAmount = money(total * (Number.isFinite(rate) ? rate : DEFAULT_PLATFORM_RATE));
+      const vendorPayout = money(total - commissionAmount);
+      return {
+        ...plain,
+        commissionRate: Number.isFinite(rate) ? rate : DEFAULT_PLATFORM_RATE,
+        commissionAmount,
+        vendorPayout,
+      };
     });
 
-    res.json(data);
+    res.json({
+      items,
+      total: count,
+      page,
+      pageSize,
+      totalPages: Math.ceil(count / pageSize),
+      rate: DEFAULT_PLATFORM_RATE,
+    });
   } catch (err) {
     console.error("ADMIN /orders failed:", err);
     res.status(500).json({ message: "Orders fetch failed", error: err.message });
   }
 });
 
-// POST alias (same behavior as GET)
-router.post("/orders", authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const where = normalizeOrderFilters(req);
-
-    const orders = await Order.findAll({
-      where,
-      include: [
-        { model: User,   attributes: ["id", "name", "email"] },
-        { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
-        { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
-      ],
-      order: [["createdAt", "DESC"]],
-    });
-
-    const data = orders.map((o) => {
-      const plain = o.toJSON();
-      plain.commission = commissionFor(plain);
-      return plain;
-    });
-
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ message: "Orders fetch failed", error: err.message });
-  }
-});
-
-/* ----------------- insights ----------------- */
+// ======================================================
+//  INSIGHTS (unchanged)
+// ======================================================
 router.get("/insights", authenticateToken, requireAdmin, async (_req, res) => {
   try {
     const recentOrders = await Order.findAll({
