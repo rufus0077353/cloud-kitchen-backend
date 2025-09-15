@@ -12,7 +12,7 @@ module.exports = (sequelize, DataTypes) => {
       isOpen:      { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
 
       // keep your existing fields:
-      UserId:      { type: DataTypes.INTEGER, allowNull: false },
+      UserId:      { type: DataTypes.INTEGER, allowNull: true, unique: true }, 
       commissionRate: { type: DataTypes.FLOAT, allowNull: true, defaultValue: 0.15 },
     },
     {
