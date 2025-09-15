@@ -10,6 +10,7 @@ module.exports = (sequelize, DataTypes) => {
       phone:    { type: DataTypes.STRING, allowNull: true },
       logoUrl:  { type: DataTypes.STRING, allowNull: true },
       isOpen:   { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+      isDeleted: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
 
       // keep existing fields
       UserId:         { type: DataTypes.INTEGER, allowNull: true, unique: true },

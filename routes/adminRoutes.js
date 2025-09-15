@@ -213,14 +213,44 @@ router.put("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
+// PATCH /api/admin/users/:id   { isDeleted: boolean }
+router.patch("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isDeleted } = req.body || {};
+    if (typeof isDeleted !== "boolean") {
+      return res.status(400).json({ message: "isDeleted boolean is required" });
+    }
+    const user = await User.findByPk(id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    // ensure column exists on your model (see section 2)
+    user.isDeleted = isDeleted;
+    await user.save();
+
+    return res.json({
+      message: isDeleted ? "User archived" : "User restored",
+      user: { id: user.id, isDeleted: user.isDeleted },
+    });
+  } catch (err) {
+    return res.status(500).json({ message: "Failed to update user", error: err.message });
+  }
+});
+
+// DELETE /api/admin/users/:id  (hard delete; also remove vendor profile if any)
 router.delete("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const user = await User.findByPk(req.params.id);
+    const { id } = req.params;
+    const user = await User.findByPk(id);
     if (!user) return res.status(404).json({ message: "User not found" });
+
+    // If this user has a vendor profile, delete it first (or rely on FK cascade)
+    await Vendor.destroy({ where: { UserId: id } });
     await user.destroy();
-    res.json({ message: "User deleted" });
+
+    return res.json({ message: "User deleted", ok: true });
   } catch (err) {
-    res.status(500).json({ message: "User deletion failed", error: err.message });
+    return res.status(500).json({ message: "Failed to delete user", error: err.message });
   }
 });
 

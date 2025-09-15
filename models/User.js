@@ -7,6 +7,7 @@ module.exports = (sequelize, DataTypes) => {
     email:    { type: DataTypes.STRING, unique: true, allowNull: false },
     password: { type: DataTypes.STRING, allowNull: false },
     role:     { type: DataTypes.STRING, defaultValue: "user" },
+    isDeleted : { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
   }, {
     tableName: "users",
     timestamps: true,
