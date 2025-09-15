@@ -34,6 +34,23 @@ const commissionFor = (orderPlain) => {
   return money(total * (Number.isFinite(rate) ? rate : DEFAULT_PLATFORM_RATE));
 };
 
+/** Ensure a Vendor profile exists for this user (when role is 'vendor'). */
+async function ensureVendorProfileForUser(user) {
+  if (!user) return null;
+  let vendor = await Vendor.findOne({ where: { UserId: user.id } });
+  if (!vendor) {
+    vendor = await Vendor.create({
+      name: user.name || `Vendor ${user.id}`,
+      cuisine: "",
+      location: "",
+      UserId: user.id,
+      isOpen: true,
+      commissionRate: DEFAULT_PLATFORM_RATE,
+    });
+  }
+  return vendor;
+}
+
 // ======================================================
 //  OVERVIEW  →  /api/admin/overview
 // ======================================================
@@ -86,10 +103,9 @@ router.get("/overview", authenticateToken, requireAdmin, async (_req, res) => {
 
 // ======================================================
 //  USERS (paginated)  →  /api/admin/users
-//    q, role, status, page, pageSize
+//  q, role, status, page, pageSize
 // ======================================================
 
-/* ----------------- users (paginated, safe) ----------------- */
 router.get("/users", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const page     = Math.max(1, parseInt(req.query.page, 10) || 1);
@@ -100,7 +116,7 @@ router.get("/users", authenticateToken, requireAdmin, async (req, res) => {
 
     const where = {};
     if (role)   where.role = role;
-    if (status) where.status = status; // will be ignored by DB if column doesn't exist
+    if (status) where.status = status; // ignored if column doesn't exist
     if (search) {
       where[Op.or] = [
         { name:  { [Op.iLike]: `%${search}%` } },
@@ -110,7 +126,6 @@ router.get("/users", authenticateToken, requireAdmin, async (req, res) => {
 
     const { count, rows } = await User.findAndCountAll({
       where,
-      // don't select password; selecting * avoids errors if some optional columns don't exist
       attributes: { exclude: ["password"] },
       order: [["createdAt", "DESC"]],
       limit: pageSize,
@@ -130,23 +145,46 @@ router.get("/users", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
+/** CREATE USER (Admin)
+ * Body: { name, email, password, role }  role ∈ ['user','vendor','admin']
+ * - hashes password
+ * - if role=vendor, auto-creates Vendor row linked via UserId
+ */
 router.post("/users", authenticateToken, requireAdmin, async (req, res) => {
-  const { name, email, password, role } = req.body || {};
-  if (!name || !email || !password || !role) {
-    return res.status(400).json({ message: "All fields are required" });
-  }
   try {
+    const { name, email, password, role = "user" } = req.body || {};
+    if (!name || !email || !password) {
+      return res.status(400).json({ message: "name, email, password are required" });
+    }
+    if (!["user", "vendor", "admin"].includes(role)) {
+      return res.status(400).json({ message: "Invalid role" });
+    }
+
     const exists = await User.findOne({ where: { email } });
     if (exists) return res.status(409).json({ message: "Email already in use" });
 
-    const user = await User.create({ name, email, password, role });
+    const hashed = await bcrypt.hash(password, 10);
+    const user = await User.create({ name, email, password: hashed, role });
+
+    let vendor = null;
+    if (role === "vendor") vendor = await ensureVendorProfileForUser(user);
+
     const plain = user.toJSON(); delete plain.password;
-    res.status(201).json({ message: "User created", user: plain });
+    res.status(201).json({
+      message: "User created",
+      user: plain,
+      vendor: vendor ? { id: vendor.id, UserId: vendor.UserId } : null,
+    });
   } catch (err) {
     res.status(500).json({ message: "User creation failed", error: err.message });
   }
 });
 
+/** UPDATE USER (Admin)
+ * Optional: name, email, password, role, status
+ * - hashes password when provided
+ * - if role switches to vendor, ensures Vendor profile exists
+ */
 router.put("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { name, email, password, role, status } = req.body || {};
@@ -156,16 +194,25 @@ router.put("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
     if (name != null)  user.name = name;
     if (email != null) user.email = email;
     if (role != null)  user.role = role;
-    if (status != null && "status" in user) user.status = status; // only if column exists
+    if (status != null && "status" in user) user.status = status;
     if (password) user.password = await bcrypt.hash(password, 10);
 
     await user.save();
+
+    let vendor = null;
+    if (role === "vendor") vendor = await ensureVendorProfileForUser(user);
+
     const plain = user.toJSON(); delete plain.password;
-    res.json({ message: "User updated successfully", user: plain });
+    res.json({
+      message: "User updated successfully",
+      user: plain,
+      vendor: vendor ? { id: vendor.id, UserId: vendor.UserId } : null,
+    });
   } catch (err) {
     res.status(500).json({ message: "Failed to update user", error: err.message });
   }
 });
+
 router.delete("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const user = await User.findByPk(req.params.id);
@@ -177,13 +224,52 @@ router.delete("/users/:id", authenticateToken, requireAdmin, async (req, res) =>
   }
 });
 
+/** CHANGE ROLE ONLY (simple endpoint)
+ * Body: { role }  role ∈ ['user','vendor','admin']
+ * - creates Vendor profile when role becomes 'vendor'
+ */
+router.put("/users/:id/role", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { role } = req.body || {};
+    if (!["user", "vendor", "admin"].includes(role)) {
+      return res.status(400).json({ message: "Invalid role" });
+    }
+    const user = await User.findByPk(req.params.id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    user.role = role;
+    await user.save();
+
+    let vendor = null;
+    if (role === "vendor") vendor = await ensureVendorProfileForUser(user);
+
+    const plain = user.toJSON(); delete plain.password;
+    res.json({
+      message: `Role set to '${role}'`,
+      user: plain,
+      vendor: vendor ? { id: vendor.id, UserId: vendor.UserId } : null,
+    });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to update role", error: err.message });
+  }
+});
+
+/** Backwards-compatible promote route (kept)
+ * Promotes to vendor and ensures vendor profile exists
+ */
 router.put("/promote/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const user = await User.findByPk(req.params.id);
     if (!user) return res.status(404).json({ message: "User not found" });
     user.role = "vendor";
     await user.save();
-    res.json({ message: "User promoted to vendor successfully", user });
+    const vendor = await ensureVendorProfileForUser(user);
+    const plain = user.toJSON(); delete plain.password;
+    res.json({
+      message: "User promoted to vendor successfully",
+      user: plain,
+      vendor: vendor ? { id: vendor.id, UserId: vendor.UserId } : null,
+    });
   } catch (err) {
     res.status(500).json({ message: "Failed to promote user", error: err.message });
   }
@@ -191,7 +277,7 @@ router.put("/promote/:id", authenticateToken, requireAdmin, async (req, res) => 
 
 // ======================================================
 //  VENDORS (paginated)  →  /api/admin/vendors
-//    q, status=open|closed, userId, page, pageSize
+//  q, status=open|closed, userId, page, pageSize
 // ======================================================
 router.get("/vendors", authenticateToken, requireAdmin, async (req, res) => {
   try {
@@ -311,7 +397,7 @@ router.get("/filter", authenticateToken, requireAdmin, async (req, res) => {
 
 // ======================================================
 //  ORDERS (paginated)  →  /api/admin/orders
-//    page, pageSize, status, paymentStatus, vendorId, userId, from, to
+//  page, pageSize, status, paymentStatus, vendorId, userId, from, to
 // ======================================================
 router.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   try {
