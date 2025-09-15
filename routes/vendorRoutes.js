@@ -6,7 +6,7 @@ const router = express.Router();
 const { Vendor, MenuItem } = require("../models");
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
-
+const  vendorController = require("../controllers/vendorController");
 // Who am I (vendor)
 router.get(
   "/me",
