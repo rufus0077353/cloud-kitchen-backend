@@ -54,50 +54,85 @@ async function ensureVendorProfileForUser(user) {
 // ======================================================
 //  OVERVIEW  →  /api/admin/overview
 // ======================================================
+
+// --- OVERVIEW: totals & commissions ---
 router.get("/overview", authenticateToken, requireAdmin, async (_req, res) => {
   try {
-    const [users, vendors, orders] = await Promise.all([
+    // Totals
+    const [totalUsers, totalVendors, totalOrders] = await Promise.all([
       User.count(),
       Vendor.count(),
       Order.count(),
     ]);
 
-    // lifetime paid & non-canceled revenue
-    const paidOrders = await Order.findAll({
-      where: { paymentStatus: "paid", status: { [Op.notIn]: NON_REVENUE_STATUSES } },
-      include: [{ model: Vendor, attributes: ["id", "commissionRate"] }],
-      attributes: ["id", "totalAmount", "VendorId", "createdAt"],
+    // Revenue/commission (paid, non-cancelled)
+    const CANCEL = ["rejected", "cancelled", "canceled"];
+    const PAID = "paid";
+
+    const wherePaidNonCancelled = {
+      paymentStatus: PAID,
+      status: { [Op.notIn]: CANCEL },
+    };
+
+    // Sum totalAmount over eligible orders
+    const totalRevenueRow = await Order.findOne({
+      where: wherePaidNonCancelled,
+      attributes: [[Sequelize.fn("COALESCE", Sequelize.fn("SUM", Sequelize.col("totalAmount")), 0), "sum"]],
       raw: true,
-      nest: true,
+    });
+    const totalRevenue = Number(totalRevenueRow?.sum || 0);
+
+    // Commission sum:
+    // Prefer explicit per-order commission column if present, else compute: totalAmount * (order.commissionRate || vendor.commissionRate || DEFAULT_PLATFORM_RATE)
+    // We’ll compute in JS to be model-agnostic.
+    const eligibleOrders = await Order.findAll({
+      where: wherePaidNonCancelled,
+      include: [{ model: Vendor, attributes: ["commissionRate"], required: false }],
+      attributes: ["id", "totalAmount", "commission", "commissionAmount", "platformCommission", "platformFee", "commissionRate", "createdAt"],
+      raw: false,
     });
 
-    const totalRevenue = money(
-      paidOrders.reduce((s, o) => s + Number(o.totalAmount || 0), 0)
-    );
-    const totalCommission = money(paidOrders.reduce((s, o) => s + commissionFor(o), 0));
+    const DEFAULT_RATE = Number(process.env.PLATFORM_RATE || 0.15);
+    const commissionOf = (o) => {
+      const explicit =
+        o.get?.("commission") ??
+        o.get?.("commissionAmount") ??
+        o.get?.("platformCommission") ??
+        o.get?.("platformFee");
+      if (explicit != null && explicit !== undefined) return Number(explicit) || 0;
 
+      const rate =
+        (o.get?.("commissionRate") != null ? Number(o.get("commissionRate")) : null) ??
+        (o.Vendor?.commissionRate != null ? Number(o.Vendor.commissionRate) : null) ??
+        DEFAULT_RATE;
+
+      const total = Number(o.get?.("totalAmount") ?? 0);
+      return Math.max(0, total * (isFinite(rate) ? rate : DEFAULT_RATE));
+    };
+
+    let totalCommission = 0;
+    let monthCommission = 0;
     const now = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const monthCommission = money(
-      paidOrders
-        .filter((o) => new Date(o.createdAt) >= monthStart)
-        .reduce((s, o) => s + commissionFor(o), 0)
-    );
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
 
-    res.json({
-      totals: {
-        users,
-        vendors,
-        orders,
-        revenue: totalRevenue,
-        commission: totalCommission,
-        commissionThisMonth: monthCommission,
-      },
-      rate: DEFAULT_PLATFORM_RATE,
+    for (const o of eligibleOrders) {
+      const c = commissionOf(o);
+      totalCommission += c;
+      const createdTs = o.get("createdAt") ? new Date(o.get("createdAt")).getTime() : 0;
+      if (createdTs >= monthStart) monthCommission += c;
+    }
+
+    return res.json({
+      totalUsers,
+      totalVendors,
+      totalOrders,
+      totalRevenue,
+      totalCommission: Number(totalCommission.toFixed(2)),
+      monthCommission: Number(monthCommission.toFixed(2)),
     });
-  } catch (err) {
-    console.error("overview error:", err);
-    res.status(500).json({ message: "Overview fetch failed", error: err.message });
+  } catch (e) {
+    console.error("overview error:", e);
+    return res.status(500).json({ message: "Overview failed", error: e.message });
   }
 });
 
