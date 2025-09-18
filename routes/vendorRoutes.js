@@ -1,8 +1,10 @@
+
 // routes/vendorRoutes.js
 const express = require("express");
 const router = express.Router();
 
-const { Vendor, MenuItem } = require("../models");
+const { Op } = require("sequelize");
+const { Vendor, MenuItem, Order } = require("../models");
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 
@@ -166,5 +168,79 @@ router.delete("/:id", authenticateToken, async (req, res) => {
     res.status(500).json({ message: "Error deleting vendor", error: err.message });
   }
 });
+
+/* ----------------- PAYOUTS (ALIASES FOR FRONTEND) ----------------- */
+/* GET /api/vendors/:vendorId/payouts  -> same summary your UI expects */
+router.get(
+  "/:vendorId/payouts",
+  authenticateToken,
+  requireVendor,
+  ensureVendorProfile,
+  async (req, res) => {
+    try {
+      const vendorId = Number(req.params.vendorId);
+      if (!Number.isFinite(vendorId)) {
+        return res.status(400).json({ message: "Invalid vendor id" });
+      }
+
+      // authorize: must be this vendor or admin
+      const isAuthorized = req.vendor?.id === vendorId || req.user?.role === "admin";
+      if (!isAuthorized) return res.status(403).json({ message: "Not authorized" });
+
+      const { from, to } = req.query;
+      const where = {
+        VendorId: vendorId,
+        status: { [Op.notIn]: ["rejected", "canceled"] },
+      };
+      if (from || to) {
+        where.createdAt = {};
+        if (from) where.createdAt[Op.gte] = new Date(from);
+        if (to)   where.createdAt[Op.lte] = new Date(to);
+      }
+
+      const COMMISSION_PCT = Number(process.env.COMMISSION_PCT || 0.15);
+
+      const grossPaid =
+        (await Order.sum("totalAmount", { where: { ...where, paymentStatus: "paid" } })) || 0;
+      const paidOrders = await Order.count({
+        where: { ...where, paymentStatus: "paid" },
+      });
+      const unpaidGross =
+        (await Order.sum("totalAmount", {
+          where: { ...where, paymentStatus: { [Op.ne]: "paid" } },
+        })) || 0;
+
+      const commission = +(grossPaid * COMMISSION_PCT).toFixed(2);
+      const netOwed = +(grossPaid - commission).toFixed(2);
+
+      return res.json({
+        vendorId,
+        dateRange: { from: from || null, to: to || null },
+        rate: COMMISSION_PCT,
+        paidOrders,
+        grossPaid: +grossPaid.toFixed(2),
+        commission,
+        netOwed,
+        grossUnpaid: +unpaidGross.toFixed(2),
+      });
+    } catch (err) {
+      return res
+        .status(500)
+        .json({ message: "Failed to build payouts summary", error: err.message });
+    }
+  }
+);
+
+/* Optional: GET /api/vendors/me/payouts */
+router.get(
+  "/me/payouts",
+  authenticateToken,
+  requireVendor,
+  ensureVendorProfile,
+  async (req, res) => {
+    req.params.vendorId = String(req.vendor.id);
+    return router.handle(req, res); // reuse the handler above
+  }
+);
 
 module.exports = router;
