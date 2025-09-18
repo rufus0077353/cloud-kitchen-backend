@@ -1,3 +1,5 @@
+
+// routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
 const { Op } = require("sequelize");
@@ -9,6 +11,7 @@ const {
   Vendor,
   MenuItem,
   User,
+  Payout, // ✅ used in /:id/status
 } = require("../models");
 
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
@@ -18,7 +21,8 @@ const { notifyUser } = require("../utils/notifications");
 
 /* ---------- config / optional deps ---------- */
 const COMMISSION_PCT = Number(process.env.COMMISSION_PCT || 0.15);
-let Puppeteer = null; try { Puppeteer = require("puppeteer"); } catch {}
+let Puppeteer = null;
+try { Puppeteer = require("puppeteer"); } catch {}
 
 /* ----------------- socket helpers ----------------- */
 function emitToVendorHelper(req, vendorId, event, payload) {
@@ -85,7 +89,7 @@ async function safeCreateIdempotencyKey(record, t) {
   }
 }
 
-// ---- unified filter handler (works for GET ?query and POST body) ----
+/* ----------------- unified filter handler ----------------- */
 async function filterHandler(req, res) {
   const src = req.method === "GET" ? req.query : req.body;
   const { UserId, VendorId, status, startDate, endDate } = src;
@@ -105,7 +109,7 @@ async function filterHandler(req, res) {
       where,
       include: [
         { model: User, attributes: ["id", "name", "email"] },
-        { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] }, // include commissionRate
+        { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
         { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
       ],
       order: [["createdAt", "DESC"]],
@@ -141,7 +145,8 @@ router.get("/my", authenticateToken, async (req, res) => {
       });
     }
 
-    const orders = await Order.findAll({
+    // ✅ Non-paginated returns consistent object
+    const rows = await Order.findAll({
       where: { UserId: req.user.id },
       include: [
         { model: Vendor, attributes: ["id", "name", "cuisine"] },
@@ -149,7 +154,13 @@ router.get("/my", authenticateToken, async (req, res) => {
       ],
       order: [["createdAt", "DESC"]],
     });
-    res.json(orders);
+    return res.json({
+      items: rows,
+      total: rows.length,
+      page: 0,
+      pageSize: rows.length,
+      totalPages: 1,
+    });
   } catch (err) {
     res.status(500).json({ message: "Error fetching user orders", error: err.message });
   }
@@ -186,7 +197,8 @@ router.get(
         });
       }
 
-      const orders = await Order.findAll({
+      // ✅ Non-paginated returns consistent object
+      const rows = await Order.findAll({
         where: { VendorId: vendorId },
         include: [
           { model: User, attributes: ["id", "name", "email"] },
@@ -194,7 +206,13 @@ router.get(
         ],
         order: [["createdAt", "DESC"]],
       });
-      res.json(orders);
+      return res.json({
+        items: rows,
+        total: rows.length,
+        page: 0,
+        pageSize: rows.length,
+        totalPages: 1,
+      });
     } catch (err) {
       res.status(500).json({ message: "Error fetching vendor orders", error: err.message });
     }
@@ -283,14 +301,19 @@ router.get(
       start.setHours(0, 0, 0, 0);
       start.setDate(start.getDate() - (days - 1));
 
-      const sequelizeLocal = Order.sequelize;
-      const [rows] = await sequelizeLocal.query(
+      // ✅ use actual table name from Sequelize (handles "Orders" vs "orders")
+      const tname = Order.getTableName();
+      const table =
+        typeof tname === "object" && tname.schema ? `"${tname.schema}"."${tname.tableName}"` :
+        typeof tname === "string" ? `"${tname}"` : `"Orders"`;
+
+      const [rows] = await sequelize.query(
         `
         SELECT
           to_char(date_trunc('day', "createdAt"), 'YYYY-MM-DD') AS date,
-          COUNT(*) FILTER (WHERE status NOT IN ('rejected','canceled'))                                           AS orders,
-          COALESCE(SUM(CASE WHEN status NOT IN ('rejected','canceled') THEN "totalAmount" END), 0)                AS revenue
-        FROM "orders"
+          COUNT(*) FILTER (WHERE status NOT IN ('rejected','canceled')) AS orders,
+          COALESCE(SUM(CASE WHEN status NOT IN ('rejected','canceled') THEN "totalAmount" END), 0) AS revenue
+        FROM ${table}
         WHERE "VendorId" = :vendorId
           AND "createdAt" >= :startDate
         GROUP BY 1
@@ -673,7 +696,6 @@ router.patch(
       if (statusRaw === "delivered" && order.paymentStatus === "paid") {
         const gross = Number(order.totalAmount || 0);
 
-        // Use order.commissionRate, else vendor.commissionRate, else platform default
         const rate =
           (order.commissionRate != null ? Number(order.commissionRate) : null) ??
           (order.Vendor?.commissionRate != null ? Number(order.Vendor.commissionRate) : null) ??
@@ -691,15 +713,13 @@ router.patch(
           status: "pending",
         });
 
-        //  EMIT HETE (so vendor UI gets live payout)
-        //If you use helpers elsewhere, keep this consistent:
-        //emitToVendorHelper(req, order.VendorId, "payout:update", {...})
+        // live payout update
         req.app.get("emitToVendor")?.(order.VendorId, "payout:update", {
           orderId: order.id,
           VendorId: order.VendorId,
           payoutAmount: payout,
           status: "pending",
-        }); 
+        });
       }
 
       return res.json({ message: "Status updated", order });
@@ -731,42 +751,9 @@ router.delete("/:id", authenticateToken, async (req, res) => {
   }
 });
 
-/* ====== UPDATED FILTER: supports GET **and** POST and returns {items: []}
-   Also includes Vendor.commissionRate so the frontend won’t fall back to 15% ====== */
-async function filterHandler(req, res) {
-  // accept params from GET query or POST body
-  const src = req.method === "GET" ? req.query : req.body;
-  const { UserId, VendorId, status, startDate, endDate } = src;
-
-  const where = {};
-  if (UserId) where.UserId = UserId;
-  if (VendorId) where.VendorId = VendorId;
-  if (status) where.status = status;
-  if (startDate || endDate) {
-    where.createdAt = {};
-    if (startDate) where.createdAt[Op.gte] = new Date(startDate);
-    if (endDate)   where.createdAt[Op.lte] = new Date(endDate);
-  }
-
-  try {
-    const orders = await Order.findAll({
-      where,
-      include: [
-        { model: User, attributes: ["id", "name", "email"] },
-        // ⬇️ include commissionRate here
-        { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
-        { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
-      ],
-      order: [["createdAt", "DESC"]],
-    });
-    return res.json({ items: orders }); // shape your frontend accepts
-  } catch (err) {
-    return res.status(500).json({ message: "Error filtering orders", error: err.message });
-  }
-}
-
-router.get("/filter", authenticateToken, filterHandler);   // GET support (kept)
-router.post("/filter", authenticateToken, filterHandler);  // NEW: POST support
+/* ----------------- filter routes ----------------- */
+router.get("/filter", authenticateToken, filterHandler);
+router.post("/filter", authenticateToken, filterHandler);
 
 /* ----------------- payment status ----------------- */
 router.patch("/:id/payment", authenticateToken, async (req, res) => {
