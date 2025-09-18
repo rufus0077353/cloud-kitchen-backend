@@ -639,7 +639,7 @@ router.patch(
         return res.status(400).json({ message: "Invalid status" });
       }
 
-      const order = await Order.findByPk(id);
+      const order = await Order.findByPk(id, { include: [{ model: Vendor }] });
       if (!order) return res.status(404).json({ message: "Order not found" });
       if (order.VendorId !== vendorId) {
         return res.status(403).json({ message: "Not your order" });
@@ -648,11 +648,11 @@ router.patch(
       order.status = statusRaw;
       await order.save();
 
-      // live in-app updates via sockets
+      // live updates
       emitToVendorHelper(req, order.VendorId, "order:status", { id: order.id, status: order.status });
       emitToUserHelper(req, order.UserId, "order:status", { id: order.id, status: order.status, UserId: order.UserId });
 
-      // Optional push notification
+      // push notification
       try {
         const title = `Order #${order.id} is ${order.status}`;
         const body  = `Vendor updated your order to "${order.status}".`;
@@ -662,14 +662,49 @@ router.patch(
         console.warn("push notify failed:", e?.message);
       }
 
+      // audit log
       await audit(req, {
         action: "ORDER_STATUS_UPDATE",
         order,
         details: { by: "vendor", newStatus: statusRaw },
       });
 
+      // ✅ payout creation on delivered + paid
+      if (statusRaw === "delivered" && order.paymentStatus === "paid") {
+        const gross = Number(order.totalAmount || 0);
+
+        // Use order.commissionRate, else vendor.commissionRate, else platform default
+        const rate =
+          (order.commissionRate != null ? Number(order.commissionRate) : null) ??
+          (order.Vendor?.commissionRate != null ? Number(order.Vendor.commissionRate) : null) ??
+          Number(process.env.PLATFORM_RATE || 0.15);
+
+        const commission = Math.max(0, gross * (isFinite(rate) ? rate : 0.15));
+        const payout = Math.max(0, gross - commission);
+
+        await Payout.upsert({
+          orderId: order.id,
+          VendorId: order.VendorId,
+          grossAmount: gross,
+          commissionAmount: commission,
+          payoutAmount: payout,
+          status: "pending",
+        });
+
+        //  EMIT HETE (so vendor UI gets live payout)
+        //If you use helpers elsewhere, keep this consistent:
+        //emitToVendorHelper(req, order.VendorId, "payout:update", {...})
+        req.app.get("emitToVendor")?.(order.VendorId, "payout:update", {
+          orderId: order.id,
+          VendorId: order.VendorId,
+          payoutAmount: payout,
+          status: "pending",
+        }); 
+      }
+
       return res.json({ message: "Status updated", order });
     } catch (err) {
+      console.error("order status error:", err);
       return res.status(500).json({ message: "Failed to update status", error: err.message });
     }
   }
@@ -1050,4 +1085,5 @@ router.get("/admin", authenticateToken, async (req, res) => {
     return res.status(500).json({ message: "Failed to fetch admin orders", error: err.message });
   }
 });
+
 module.exports = router;
