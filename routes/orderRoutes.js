@@ -1,4 +1,3 @@
-
 // routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
@@ -11,7 +10,8 @@ const {
   Vendor,
   MenuItem,
   User,
-  Payout, // ✅ used in /:id/status
+  // NOTE: Payout might be defined in your models; if not, guard its use below
+  Payout,
 } = require("../models");
 
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
@@ -21,8 +21,7 @@ const { notifyUser } = require("../utils/notifications");
 
 /* ---------- config / optional deps ---------- */
 const COMMISSION_PCT = Number(process.env.COMMISSION_PCT || 0.15);
-let Puppeteer = null;
-try { Puppeteer = require("puppeteer"); } catch {}
+let Puppeteer = null; try { Puppeteer = require("puppeteer"); } catch {}
 
 /* ----------------- socket helpers ----------------- */
 function emitToVendorHelper(req, vendorId, event, payload) {
@@ -65,6 +64,21 @@ function parsePageParams(q) {
   return { page, pageSize };
 }
 
+// pull all vendor IDs owned by the logged-in user (covers “old” vendor rows)
+async function buildVendorScope(req) {
+  // if you’re already in a vendor-protected route, we still collect *all* vendor IDs
+  const vendors = await Vendor.findAll({
+    where: { UserId: req.user.id },
+    attributes: ["id"],
+  });
+  const ids = vendors.map(v => Number(v.id)).filter(Number.isFinite);
+  // hard fallback to current vendor id if somehow no rows were found
+  if (req.vendor?.id && !ids.includes(Number(req.vendor.id))) {
+    ids.push(Number(req.vendor.id));
+  }
+  return ids.length ? ids : [-1]; // -1 ensures empty result instead of “all vendors”
+}
+
 // ---- idempotency helpers (safe if table/model missing) ----
 const isMissingTableError = (err) =>
   !!(err?.original?.code === "42P01" || /no such table|does not exist/i.test(err?.message || ""));
@@ -86,37 +100,6 @@ async function safeCreateIdempotencyKey(record, t) {
   } catch (err) {
     if (isMissingTableError(err)) return;
     throw err;
-  }
-}
-
-/* ----------------- unified filter handler ----------------- */
-async function filterHandler(req, res) {
-  const src = req.method === "GET" ? req.query : req.body;
-  const { UserId, VendorId, status, startDate, endDate } = src;
-
-  const where = {};
-  if (UserId) where.UserId = UserId;
-  if (VendorId) where.VendorId = VendorId;
-  if (status) where.status = status;
-  if (startDate || endDate) {
-    where.createdAt = {};
-    if (startDate) where.createdAt[Op.gte] = new Date(startDate);
-    if (endDate)   where.createdAt[Op.lte] = new Date(endDate);
-  }
-
-  try {
-    const orders = await Order.findAll({
-      where,
-      include: [
-        { model: User, attributes: ["id", "name", "email"] },
-        { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
-        { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
-      ],
-      order: [["createdAt", "DESC"]],
-    });
-    return res.json({ items: orders });
-  } catch (err) {
-    return res.status(500).json({ message: "Error filtering orders", error: err.message });
   }
 }
 
@@ -145,8 +128,7 @@ router.get("/my", authenticateToken, async (req, res) => {
       });
     }
 
-    // ✅ Non-paginated returns consistent object
-    const rows = await Order.findAll({
+    const orders = await Order.findAll({
       where: { UserId: req.user.id },
       include: [
         { model: Vendor, attributes: ["id", "name", "cuisine"] },
@@ -154,13 +136,7 @@ router.get("/my", authenticateToken, async (req, res) => {
       ],
       order: [["createdAt", "DESC"]],
     });
-    return res.json({
-      items: rows,
-      total: rows.length,
-      page: 0,
-      pageSize: rows.length,
-      totalPages: 1,
-    });
+    res.json(orders);
   } catch (err) {
     res.status(500).json({ message: "Error fetching user orders", error: err.message });
   }
@@ -174,17 +150,21 @@ router.get(
   ensureVendorProfile,
   async (req, res) => {
     try {
-      const vendorId = req.vendor.id;
+      const vendorIds = await buildVendorScope(req); // <<< key fix
       const { page, pageSize } = parsePageParams(req.query);
+
+      const baseQuery = {
+        where: { VendorId: { [Op.in]: vendorIds } },
+        include: [
+          { model: User, attributes: ["id", "name", "email"] },
+          { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
+        ],
+        order: [["createdAt", "DESC"]],
+      };
 
       if (page > 0) {
         const { count, rows } = await Order.findAndCountAll({
-          where: { VendorId: vendorId },
-          include: [
-            { model: User, attributes: ["id", "name", "email"] },
-            { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
-          ],
-          order: [["createdAt", "DESC"]],
+          ...baseQuery,
           limit: pageSize,
           offset: (page - 1) * pageSize,
         });
@@ -197,25 +177,23 @@ router.get(
         });
       }
 
-      // ✅ Non-paginated returns consistent object
-      const rows = await Order.findAll({
-        where: { VendorId: vendorId },
-        include: [
-          { model: User, attributes: ["id", "name", "email"] },
-          { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
-        ],
-        order: [["createdAt", "DESC"]],
-      });
-      return res.json({
-        items: rows,
-        total: rows.length,
-        page: 0,
-        pageSize: rows.length,
-        totalPages: 1,
-      });
+      const orders = await Order.findAll(baseQuery);
+      res.json(orders);
     } catch (err) {
       res.status(500).json({ message: "Error fetching vendor orders", error: err.message });
     }
+  }
+);
+
+// optional alias, same payload as /vendor
+router.get(
+  "/vendor/mine",
+  authenticateToken,
+  requireVendor,
+  ensureVendorProfile,
+  async (req, res) => {
+    req.url = "/vendor" + (req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "");
+    router.handle(req, res);
   }
 );
 
@@ -227,20 +205,17 @@ router.get(
   ensureVendorProfile,
   async (req, res) => {
     try {
-      if (!req.vendor || !req.vendor.id) {
-        return res.status(400).json({ message: "Vendor profile not found for this user" });
-      }
-      const vendorId = req.vendor.id;
+      const vendorIds = await buildVendorScope(req); // <<< key fix
 
       const startOfToday = () => { const d = new Date(); d.setHours(0,0,0,0); return d; };
       const startOfWeek  = () => { const d = new Date(); const diff = (d.getDay()+6)%7; d.setHours(0,0,0,0); d.setDate(d.getDate()-diff); return d; };
       const startOfMonth = () => { const d = new Date(); d.setHours(0,0,0,0); d.setDate(1); return d; };
 
       const nonRevenueStatuses = ["rejected", "canceled"];
-      const revenueWhere = { VendorId: vendorId, status: { [Op.notIn]: nonRevenueStatuses } };
+      const revenueWhere = { VendorId: { [Op.in]: vendorIds }, status: { [Op.notIn]: nonRevenueStatuses } };
 
       const [totalOrders, lifetimeRevenue] = await Promise.all([
-        Order.count({ where: { VendorId: vendorId } }),
+        Order.count({ where: { VendorId: { [Op.in]: vendorIds } } }),
         Order.sum("totalAmount", { where: revenueWhere }),
       ]);
 
@@ -248,7 +223,7 @@ router.get(
       const statusCounts = {};
       await Promise.all(
         ST.map(async (s) => {
-          statusCounts[s] = await Order.count({ where: { VendorId: vendorId, status: s } });
+          statusCounts[s] = await Order.count({ where: { VendorId: { [Op.in]: vendorIds }, status: s } });
         })
       );
 
@@ -257,22 +232,22 @@ router.get(
       const monthStart = startOfMonth();
 
       const [ordersToday, revenueToday] = await Promise.all([
-        Order.count({ where: { VendorId: vendorId, createdAt: { [Op.gte]: todayStart } } }),
+        Order.count({ where: { VendorId: { [Op.in]: vendorIds }, createdAt: { [Op.gte]: todayStart } } }),
         Order.sum("totalAmount", { where: { ...revenueWhere, createdAt: { [Op.gte]: todayStart } } }),
       ]);
 
       const [ordersWeek, revenueWeek] = await Promise.all([
-        Order.count({ where: { VendorId: vendorId, createdAt: { [Op.gte]: weekStart } } }),
+        Order.count({ where: { VendorId: { [Op.in]: vendorIds }, createdAt: { [Op.gte]: weekStart } } }),
         Order.sum("totalAmount", { where: { ...revenueWhere, createdAt: { [Op.gte]: weekStart } } }),
       ]);
 
       const [ordersMonth, revenueMonth] = await Promise.all([
-        Order.count({ where: { VendorId: vendorId, createdAt: { [Op.gte]: monthStart } } }),
+        Order.count({ where: { VendorId: { [Op.in]: vendorIds }, createdAt: { [Op.gte]: monthStart } } }),
         Order.sum("totalAmount", { where: { ...revenueWhere, createdAt: { [Op.gte]: monthStart } } }),
       ]);
 
       res.json({
-        vendorId,
+        vendorId: req.vendor.id,
         totals:   { orders: totalOrders || 0, revenue: Number(lifetimeRevenue || 0) },
         today:    { orders: ordersToday || 0, revenue: Number(revenueToday || 0) },
         week:     { orders: ordersWeek || 0, revenue: Number(revenueWeek || 0) },
@@ -294,33 +269,28 @@ router.get(
   ensureVendorProfile,
   async (req, res) => {
     try {
-      const vendorId = req.vendor.id;
+      const vendorIds = await buildVendorScope(req); // <<< key fix
       const days = Math.max(1, Math.min(90, Number(req.query.days) || 14));
 
       const start = new Date();
       start.setHours(0, 0, 0, 0);
       start.setDate(start.getDate() - (days - 1));
 
-      // ✅ use actual table name from Sequelize (handles "Orders" vs "orders")
-      const tname = Order.getTableName();
-      const table =
-        typeof tname === "object" && tname.schema ? `"${tname.schema}"."${tname.tableName}"` :
-        typeof tname === "string" ? `"${tname}"` : `"Orders"`;
-
-      const [rows] = await sequelize.query(
-        `
-        SELECT
-          to_char(date_trunc('day', "createdAt"), 'YYYY-MM-DD') AS date,
-          COUNT(*) FILTER (WHERE status NOT IN ('rejected','canceled')) AS orders,
-          COALESCE(SUM(CASE WHEN status NOT IN ('rejected','canceled') THEN "totalAmount" END), 0) AS revenue
-        FROM ${table}
-        WHERE "VendorId" = :vendorId
-          AND "createdAt" >= :startDate
-        GROUP BY 1
-        ORDER BY 1 ASC
-        `,
-        { replacements: { vendorId, startDate: start } }
-      );
+      // build a simple series per day using ORM (portable across DBs)
+      const rows = await Order.findAll({
+        attributes: [
+          [sequelize.fn("to_char", sequelize.fn("date_trunc", "day", sequelize.col("createdAt")), "YYYY-MM-DD"), "date"],
+          [sequelize.fn("COUNT", sequelize.literal("*")), "cnt"],
+          [sequelize.fn("SUM", sequelize.literal(`CASE WHEN status NOT IN ('rejected','canceled') THEN "totalAmount" ELSE 0 END`)), "rev"],
+        ],
+        where: {
+          VendorId: { [Op.in]: vendorIds },
+          createdAt: { [Op.gte]: start },
+        },
+        group: [sequelize.fn("to_char", sequelize.fn("date_trunc", "day", sequelize.col("createdAt")), "YYYY-MM-DD")],
+        order: [[sequelize.fn("to_char", sequelize.fn("date_trunc", "day", sequelize.col("createdAt")), "YYYY-MM-DD"), "ASC"]],
+        raw: true,
+      });
 
       const map = new Map(rows.map(r => [r.date, r]));
       const out = [];
@@ -329,8 +299,8 @@ router.get(
         const key = d.toISOString().slice(0, 10);
         out.push({
           date: key,
-          orders: Number(map.get(key)?.orders || 0),
-          revenue: Number(map.get(key)?.revenue || 0),
+          orders: Number(map.get(key)?.cnt || 0),
+          revenue: Number(map.get(key)?.rev || 0),
         });
         d.setDate(d.getDate() + 1);
       }
@@ -653,7 +623,7 @@ router.patch(
   ensureVendorProfile,
   async (req, res) => {
     try {
-      const vendorId = req.vendor.id;
+      const vendorIds = await buildVendorScope(req);
       const { id } = req.params;
       const statusRaw = String(req.body?.status || "").toLowerCase();
 
@@ -664,7 +634,7 @@ router.patch(
 
       const order = await Order.findByPk(id, { include: [{ model: Vendor }] });
       if (!order) return res.status(404).json({ message: "Order not found" });
-      if (order.VendorId !== vendorId) {
+      if (!vendorIds.includes(Number(order.VendorId))) {
         return res.status(403).json({ message: "Not your order" });
       }
 
@@ -693,9 +663,10 @@ router.patch(
       });
 
       // ✅ payout creation on delivered + paid
-      if (statusRaw === "delivered" && order.paymentStatus === "paid") {
+      if (statusRaw === "delivered" && order.paymentStatus === "paid" && Payout?.upsert) {
         const gross = Number(order.totalAmount || 0);
 
+        // Use order.commissionRate, else vendor.commissionRate, else platform default
         const rate =
           (order.commissionRate != null ? Number(order.commissionRate) : null) ??
           (order.Vendor?.commissionRate != null ? Number(order.Vendor.commissionRate) : null) ??
@@ -713,7 +684,6 @@ router.patch(
           status: "pending",
         });
 
-        // live payout update
         req.app.get("emitToVendor")?.(order.VendorId, "payout:update", {
           orderId: order.id,
           VendorId: order.VendorId,
@@ -751,7 +721,36 @@ router.delete("/:id", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- filter routes ----------------- */
+/* ====== FILTER (GET/POST) ====== */
+async function filterHandler(req, res) {
+  const src = req.method === "GET" ? req.query : req.body;
+  const { UserId, VendorId, status, startDate, endDate } = src;
+
+  const where = {};
+  if (UserId) where.UserId = UserId;
+  if (VendorId) where.VendorId = VendorId;
+  if (status) where.status = status;
+  if (startDate || endDate) {
+    where.createdAt = {};
+    if (startDate) where.createdAt[Op.gte] = new Date(startDate);
+    if (endDate)   where.createdAt[Op.lte] = new Date(endDate);
+  }
+
+  try {
+    const orders = await Order.findAll({
+      where,
+      include: [
+        { model: User, attributes: ["id", "name", "email"] },
+        { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
+        { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
+      ],
+      order: [["createdAt", "DESC"]],
+    });
+    return res.json({ items: orders });
+  } catch (err) {
+    return res.status(500).json({ message: "Error filtering orders", error: err.message });
+  }
+}
 router.get("/filter", authenticateToken, filterHandler);
 router.post("/filter", authenticateToken, filterHandler);
 
@@ -938,10 +937,10 @@ router.get(
   ensureVendorProfile,
   async (req, res) => {
     try {
-      const vendorId = req.vendor.id;
+      const vendorIds = await buildVendorScope(req); // <<< key fix
       const { from, to } = req.query;
       const where = {
-        VendorId: vendorId,
+        VendorId: { [Op.in]: vendorIds },
         status: { [Op.notIn]: ["rejected", "canceled"] },
       };
       if (from || to) {
@@ -958,7 +957,7 @@ router.get(
       const netOwed    = +(grossPaid - commission).toFixed(2);
 
       return res.json({
-        vendorId,
+        vendorId: req.vendor.id,
         dateRange: { from: from || null, to: to || null },
         rate: COMMISSION_PCT,
         paidOrders,
