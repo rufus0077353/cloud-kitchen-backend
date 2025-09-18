@@ -544,4 +544,30 @@ router.get("/insights", authenticateToken, requireAdmin, async (_req, res) => {
   }
 });
 
+
+// routes/adminRoutes.js (or routes/payoutRoutes.js)
+router.patch("/payouts/:id", authenticateToken, requireAdmin, async (req, res) => {
+  const { status } = req.body || {};
+  const allowed = ["pending", "scheduled", "paid"];
+  if (!allowed.includes(status)) return res.status(400).json({ message: "Invalid payout status" });
+
+  const payout = await Payout.findByPk(req.params.id);
+  if (!payout) return res.status(404).json({ message: "Payout not found" });
+
+  payout.status = status;
+  if (status === "paid") payout.paidAt = new Date();
+  if (status === "scheduled" && !payout.scheduledAt) payout.scheduledAt = new Date();
+  await payout.save();
+
+  // 🔔 EMIT so vendor sees the update
+  req.app.get("emitToVendor")(payout.VendorId, "payout:update", {
+    orderId: payout.orderId,
+    VendorId: payout.VendorId,
+    payoutAmount: payout.payoutAmount,
+    status: payout.status,
+  });
+
+  res.json({ ok: true, payout });
+});
+
 module.exports = router;
