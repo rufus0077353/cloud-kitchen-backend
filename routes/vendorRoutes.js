@@ -159,16 +159,76 @@ router.put("/:id", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- DELETE VENDOR ----------------- */
-router.delete("/:id", authenticateToken, async (req, res) => {
+// HARD DELETE a vendor and everything related (admin only)
+router.delete("/:id/force", authenticateToken, requireAdmin, async (req, res) => {
+  const t = await Vendor.sequelize.transaction();
   try {
-    const vendor = await Vendor.findByPk(req.params.id);
-    if (!vendor) return res.status(404).json({ message: "Vendor not found" });
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) {
+      await t.rollback();
+      return res.status(400).json({ message: "Invalid id" });
+    }
 
-    await vendor.destroy();
-    res.json({ message: "Vendor deleted successfully" });
-  } catch (err) {
-    res.status(500).json({ message: "Error deleting vendor", error: err.message });
+    const v = await Vendor.findByPk(id, { transaction: t });
+    if (!v) {
+      await t.rollback();
+      return res.status(404).json({ message: "Vendor not found" });
+    }
+
+    // 1) find all orders for this vendor
+    const orders = await Order.findAll({
+      where: { VendorId: id },
+      attributes: ["id"],
+      transaction: t,
+    });
+    const orderIds = orders.map(o => o.id);
+
+    // 2) delete order line items
+    let deletedOrderItems = 0;
+    if (orderIds.length) {
+      deletedOrderItems = await OrderItem.destroy({
+        where: { OrderId: { [Op.in]: orderIds } },
+        transaction: t,
+      });
+    }
+
+    // 3) delete orders
+    const deletedOrders = await Order.destroy({
+      where: { VendorId: id },
+      transaction: t,
+    });
+
+    // 4) delete payouts if that table exists
+    let deletedPayouts = 0;
+    if (Payout && typeof Payout.destroy === "function") {
+      deletedPayouts = await Payout.destroy({
+        where: { VendorId: id },
+        transaction: t,
+      });
+    }
+
+    // 5) delete menu items
+    const deletedMenuItems = await MenuItem.destroy({
+      where: { VendorId: id },
+      transaction: t,
+    });
+
+    // 6) finally delete the vendor
+    await Vendor.destroy({ where: { id }, transaction: t });
+
+    await t.commit();
+    return res.json({
+      message: "Vendor and related data deleted",
+      counts: {
+        orders: deletedOrders,
+        orderItems: deletedOrderItems,
+        menuItems: deletedMenuItems,
+        payouts: deletedPayouts,
+      },
+    });
+  } catch (e) {
+    try { await t.rollback(); } catch {}
+    return res.status(500).json({ message: "Force delete failed", error: e.message });
   }
 });
 
