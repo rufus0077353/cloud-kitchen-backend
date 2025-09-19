@@ -17,7 +17,9 @@ const db = require("./models");
 // ---- App ----
 const app = express();
 
-// ---- Allowed frontend origins ----
+/* =========================
+   Allowed frontend origins
+   ========================= */
 const DEFAULT_ORIGINS = [
   "https://servezy.in",
   "https://www.servezy.in",
@@ -25,6 +27,7 @@ const DEFAULT_ORIGINS = [
   "http://localhost:3000",
   "http://localhost:5173", // vite
 ];
+
 const FRONTENDS_LIST = (process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(",") : DEFAULT_ORIGINS)
   .map((s) => s.trim())
   .filter(Boolean);
@@ -41,18 +44,24 @@ const isAllowedOrigin = (origin) => {
   return false;
 };
 
+// one place to keep CORS config
+const corsConfig = {
+  origin: (origin, cb) => (isAllowedOrigin(origin) ? cb(null, true) : cb(new Error("Not allowed by CORS"))),
+  credentials: true,
+  methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Idempotency-Key"],
+};
+
+/* =========================
+   Proxies & core middleware
+   ========================= */
 // Trust proxy (Render/Heroku/NGINX) so websocket upgrade works
 app.set("trust proxy", 1);
 
-// ---- Security & Middleware ----
-app.use(
-  cors({
-    origin: (origin, cb) => (isAllowedOrigin(origin) ? cb(null, true) : cb(new Error("Not allowed by CORS"))),
-    credentials: true,
-    methods: "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS",
-    allowedHeaders: "Content-Type, Authorization, X-Requested-With, Idempotency-Key",
-  })
-);
+// CORS must be early
+app.use(cors(corsConfig));
+// Explicitly answer all preflight requests fast
+app.options("*", cors(corsConfig));
 
 app.use(
   helmet({
@@ -69,7 +78,9 @@ app.use(express.urlencoded({ extended: true, limit: "250kb" }));
 
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
-// ---- Rate limits ----
+/* =========================
+   Rate limits
+   ========================= */
 app.use(
   "/api/",
   rateLimit({
@@ -77,6 +88,7 @@ app.use(
     max: 800,
     standardHeaders: true,
     legacyHeaders: false,
+    skip: (req) => req.method === "OPTIONS", // don't rate-limit preflight
   })
 );
 app.use(
@@ -86,19 +98,18 @@ app.use(
     max: 50,
     standardHeaders: true,
     legacyHeaders: false,
+    skip: (req) => req.method === "OPTIONS",
   })
 );
 
-// ---- HTTP server + Socket.IO ----
+/* =========================
+   HTTP server + Socket.IO
+   ========================= */
 const server = http.createServer(app);
 
 const io = new Server(server, {
   path: "/socket.io",
-  cors: {
-    origin: (origin, cb) => (isAllowedOrigin(origin) ? cb(null, true) : cb(new Error("Not allowed by CORS"))),
-    credentials: true,
-    methods: ["GET", "POST"],
-  },
+  cors: corsConfig,
   pingInterval: 25000,
   pingTimeout: 60000,
   allowEIO3: true,
@@ -113,7 +124,7 @@ io.use((socket, next) => {
 
 // socket helpers exposed to routes
 const emitToVendor = (vendorId, event, payload) => vendorId && io.to(`vendor:${vendorId}`).emit(event, payload);
-const emitToUser   = (userId, event, payload) => userId && io.to(`user:${userId}`).emit(event, payload);
+const emitToUser = (userId, event, payload) => userId && io.to(`user:${userId}`).emit(event, payload);
 app.set("io", io);
 app.set("emitToVendor", emitToVendor);
 app.set("emitToUser", emitToUser);
@@ -124,24 +135,27 @@ io.on("connection", (socket) => {
   socket.emit("connected", { id: socket.id });
 
   socket.on("vendor:join", (vendorId) => vendorId && socket.join(`vendor:${vendorId}`));
-  socket.on("user:join",   (userId)   => userId   && socket.join(`user:${userId}`));
+  socket.on("user:join", (userId) => userId && socket.join(`user:${userId}`));
 
   socket.on("disconnect", (reason) => {
     console.log("🔌 socket disconnected:", reason);
   });
 });
 
-// ---- Routes ----
+/* =========================
+   Routes
+   ========================= */
 const { VAPID_PUBLIC_KEY } = require("./utils/push");
 
-const authRoutes     = require("./routes/authRoutes");
-const vendorRoutes   = require("./routes/vendorRoutes");
+const authRoutes = require("./routes/authRoutes");
+const vendorRoutes = require("./routes/vendorRoutes");
 const menuItemRoutes = require("./routes/menuItemRoutes");
-const orderRoutes    = require("./routes/orderRoutes");
-const adminRoutes    = require("./routes/adminRoutes");
-const pushRoutes     = require("./routes/pushRoutes");
-const uploadRoutes   = require("./routes/uploadRoutes");
+const orderRoutes = require("./routes/orderRoutes");
+const adminRoutes = require("./routes/adminRoutes");
+const pushRoutes = require("./routes/pushRoutes");
+const uploadRoutes = require("./routes/uploadRoutes");
 
+// Optional payments router: support either file name
 let paymentsRouter = null;
 try {
   paymentsRouter = require("./routes/payments");
@@ -156,11 +170,15 @@ try {
 const mountSafe = (p, r) => (r && typeof r === "function" ? app.use(p, r) : console.warn(`⚠️  Skipped mounting ${p}`));
 const mountWithEmit = (p, r) =>
   r && typeof r === "function"
-    ? app.use(p, (req, _res, next) => {
-        req.emitToVendor = emitToVendor;
-        req.emitToUser   = emitToUser;
-        next();
-      }, r)
+    ? app.use(
+        p,
+        (req, _res, next) => {
+          req.emitToVendor = emitToVendor;
+          req.emitToUser = emitToUser;
+          next();
+        },
+        r
+      )
     : console.warn(`⚠️  Skipped mounting ${p}`);
 
 mountSafe("/api/auth", authRoutes);
@@ -172,6 +190,7 @@ mountSafe("/api/admin", adminRoutes);
 mountSafe("/api/uploads", uploadRoutes);
 if (paymentsRouter) mountWithEmit("/api/payments", paymentsRouter);
 
+// Public key endpoint
 app.get("/public-key", (_req, res) => res.json({ publicKey: VAPID_PUBLIC_KEY || "" }));
 
 // Health
@@ -191,10 +210,13 @@ app.use((err, req, res, _next) => {
   res.status(500).json({ message: "Server error" });
 });
 
-// ---- Start ----
+/* =========================
+   Start
+   ========================= */
 const PORT = process.env.PORT || 5000;
+// help proxies keep connections alive a bit longer
 server.keepAliveTimeout = 65000;
-server.headersTimeout   = 66000;
+server.headersTimeout = 66000;
 
 db.sequelize
   .sync({ alter: true })
