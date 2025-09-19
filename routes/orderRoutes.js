@@ -1,4 +1,3 @@
-// routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
 const { Op } = require("sequelize");
@@ -10,8 +9,7 @@ const {
   Vendor,
   MenuItem,
   User,
-  // NOTE: Payout might be defined in your models; if not, guard its use below
-  Payout,
+  Payout, // may be missing; guarded where used
 } = require("../models");
 
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
@@ -64,19 +62,15 @@ function parsePageParams(q) {
   return { page, pageSize };
 }
 
-// pull all vendor IDs owned by the logged-in user (covers “old” vendor rows)
+// collect ALL VendorIds for this user (covers historical vendor rows)
 async function buildVendorScope(req) {
-  // if you’re already in a vendor-protected route, we still collect *all* vendor IDs
   const vendors = await Vendor.findAll({
     where: { UserId: req.user.id },
     attributes: ["id"],
   });
   const ids = vendors.map(v => Number(v.id)).filter(Number.isFinite);
-  // hard fallback to current vendor id if somehow no rows were found
-  if (req.vendor?.id && !ids.includes(Number(req.vendor.id))) {
-    ids.push(Number(req.vendor.id));
-  }
-  return ids.length ? ids : [-1]; // -1 ensures empty result instead of “all vendors”
+  if (req.vendor?.id && !ids.includes(Number(req.vendor.id))) ids.push(Number(req.vendor.id));
+  return ids.length ? ids : [-1];
 }
 
 // ---- idempotency helpers (safe if table/model missing) ----
@@ -142,7 +136,7 @@ router.get("/my", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- vendor (current) orders — optionally paginated ----------------- */
+/* ----------------- vendor orders — supports historical VendorIds ----------------- */
 router.get(
   "/vendor",
   authenticateToken,
@@ -150,7 +144,7 @@ router.get(
   ensureVendorProfile,
   async (req, res) => {
     try {
-      const vendorIds = await buildVendorScope(req); // <<< key fix
+      const vendorIds = await buildVendorScope(req);
       const { page, pageSize } = parsePageParams(req.query);
 
       const baseQuery = {
@@ -164,16 +158,10 @@ router.get(
 
       if (page > 0) {
         const { count, rows } = await Order.findAndCountAll({
-          ...baseQuery,
-          limit: pageSize,
-          offset: (page - 1) * pageSize,
+          ...baseQuery, limit: pageSize, offset: (page - 1) * pageSize,
         });
         return res.json({
-          items: rows,
-          total: count,
-          page,
-          pageSize,
-          totalPages: Math.ceil(count / pageSize),
+          items: rows, total: count, page, pageSize, totalPages: Math.ceil(count / pageSize),
         });
       }
 
@@ -185,7 +173,7 @@ router.get(
   }
 );
 
-// optional alias, same payload as /vendor
+// simple alias
 router.get(
   "/vendor/mine",
   authenticateToken,
@@ -197,7 +185,7 @@ router.get(
   }
 );
 
-/* ----------------- vendor summary (keep before /vendor/:vendorId) ----------------- */
+/* ----------------- vendor summary (uses all VendorIds) ----------------- */
 router.get(
   "/vendor/summary",
   authenticateToken,
@@ -205,7 +193,7 @@ router.get(
   ensureVendorProfile,
   async (req, res) => {
     try {
-      const vendorIds = await buildVendorScope(req); // <<< key fix
+      const vendorIds = await buildVendorScope(req);
 
       const startOfToday = () => { const d = new Date(); d.setHours(0,0,0,0); return d; };
       const startOfWeek  = () => { const d = new Date(); const diff = (d.getDay()+6)%7; d.setHours(0,0,0,0); d.setDate(d.getDate()-diff); return d; };
@@ -261,7 +249,7 @@ router.get(
   }
 );
 
-/* ----------------- vendor daily (for charts) ----------------- */
+/* ----------------- vendor daily (uses all VendorIds) ----------------- */
 router.get(
   "/vendor/daily",
   authenticateToken,
@@ -269,24 +257,20 @@ router.get(
   ensureVendorProfile,
   async (req, res) => {
     try {
-      const vendorIds = await buildVendorScope(req); // <<< key fix
+      const vendorIds = await buildVendorScope(req);
       const days = Math.max(1, Math.min(90, Number(req.query.days) || 14));
 
       const start = new Date();
       start.setHours(0, 0, 0, 0);
       start.setDate(start.getDate() - (days - 1));
 
-      // build a simple series per day using ORM (portable across DBs)
       const rows = await Order.findAll({
         attributes: [
           [sequelize.fn("to_char", sequelize.fn("date_trunc", "day", sequelize.col("createdAt")), "YYYY-MM-DD"), "date"],
           [sequelize.fn("COUNT", sequelize.literal("*")), "cnt"],
           [sequelize.fn("SUM", sequelize.literal(`CASE WHEN status NOT IN ('rejected','canceled') THEN "totalAmount" ELSE 0 END`)), "rev"],
         ],
-        where: {
-          VendorId: { [Op.in]: vendorIds },
-          createdAt: { [Op.gte]: start },
-        },
+        where: { VendorId: { [Op.in]: vendorIds }, createdAt: { [Op.gte]: start } },
         group: [sequelize.fn("to_char", sequelize.fn("date_trunc", "day", sequelize.col("createdAt")), "YYYY-MM-DD")],
         order: [[sequelize.fn("to_char", sequelize.fn("date_trunc", "day", sequelize.col("createdAt")), "YYYY-MM-DD"), "ASC"]],
         raw: true,
@@ -641,11 +625,9 @@ router.patch(
       order.status = statusRaw;
       await order.save();
 
-      // live updates
       emitToVendorHelper(req, order.VendorId, "order:status", { id: order.id, status: order.status });
       emitToUserHelper(req, order.UserId, "order:status", { id: order.id, status: order.status, UserId: order.UserId });
 
-      // push notification
       try {
         const title = `Order #${order.id} is ${order.status}`;
         const body  = `Vendor updated your order to "${order.status}".`;
@@ -655,18 +637,8 @@ router.patch(
         console.warn("push notify failed:", e?.message);
       }
 
-      // audit log
-      await audit(req, {
-        action: "ORDER_STATUS_UPDATE",
-        order,
-        details: { by: "vendor", newStatus: statusRaw },
-      });
-
-      // ✅ payout creation on delivered + paid
       if (statusRaw === "delivered" && order.paymentStatus === "paid" && Payout?.upsert) {
         const gross = Number(order.totalAmount || 0);
-
-        // Use order.commissionRate, else vendor.commissionRate, else platform default
         const rate =
           (order.commissionRate != null ? Number(order.commissionRate) : null) ??
           (order.Vendor?.commissionRate != null ? Number(order.Vendor.commissionRate) : null) ??
@@ -700,7 +672,7 @@ router.patch(
   }
 );
 
-/* ----------------- hard delete (restrict as needed) ----------------- */
+/* ----------------- hard delete ----------------- */
 router.delete("/:id", authenticateToken, async (req, res) => {
   try {
     const order = await Order.findByPk(req.params.id);
@@ -777,20 +749,15 @@ router.patch("/:id/payment", authenticateToken, async (req, res) => {
         if (v) vendorIdClaim = v.id;
       } catch (_) {}
     }
-    const isOwnerVendor =
-      vendorIdClaim && Number(order.VendorId) === Number(vendorIdClaim);
+    const isOwnerVendor = vendorIdClaim && Number(order.VendorId) === Number(vendorIdClaim);
     const isAdmin = role === "admin";
 
     if (!(isOwnerVendor || isAdmin)) {
-      return res
-        .status(403)
-        .json({ message: "Not authorized to update payment for this order" });
+      return res.status(403).json({ message: "Not authorized to update payment for this order" });
     }
 
     if (["canceled", "cancelled", "rejected"].includes((order.status || "").toLowerCase())) {
-      return res
-        .status(400)
-        .json({ message: `Cannot set payment on a ${order.status} order` });
+      return res.status(400).json({ message: `Cannot set payment on a ${order.status} order` });
     }
 
     order.paymentStatus = status;
@@ -812,11 +779,9 @@ router.patch("/:id/payment", authenticateToken, async (req, res) => {
     try {
       const title = `Payment ${status} for Order #${order.id}`;
       const body =
-        status === "paid"
-          ? "Thanks! Your payment is confirmed."
-          : status === "failed"
-          ? "Payment failed. Please try again."
-          : "Payment set to unpaid.";
+        status === "paid" ? "Thanks! Your payment is confirmed."
+        : status === "failed" ? "Payment failed. Please try again."
+        : "Payment set to unpaid.";
       const url = `/orders`;
       await notifyUser(order.UserId, { title, body, url, tag: `order-${order.id}` });
     } catch (e) {
@@ -929,7 +894,7 @@ router.get("/:id/invoice.pdf", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- VENDOR PAYOUTS SUMMARY ----------------- */
+/* ----------------- VENDOR PAYOUTS SUMMARY (uses all VendorIds) ----------------- */
 router.get(
   "/payouts/summary",
   authenticateToken,
@@ -937,7 +902,7 @@ router.get(
   ensureVendorProfile,
   async (req, res) => {
     try {
-      const vendorIds = await buildVendorScope(req); // <<< key fix
+      const vendorIds = await buildVendorScope(req);
       const { from, to } = req.query;
       const where = {
         VendorId: { [Op.in]: vendorIds },
@@ -1021,55 +986,25 @@ router.get("/payouts/summary/all", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- ADMIN: orders list with commission ----------------- */
-router.get("/admin", authenticateToken, async (req, res) => {
-  try {
-    if (req.user?.role !== "admin") return res.status(403).json({ message: "Admin only" });
-
-    const { page = 1, pageSize = 20, status, paymentStatus, vendorId, userId } = req.query;
-    const p  = Math.max(1, Number(page) || 1);
-    const ps = Math.min(100, Math.max(1, Number(pageSize) || 20));
-
-    const where = {};
-    if (status)        where.status = status;
-    if (paymentStatus) where.paymentStatus = paymentStatus;
-    if (vendorId)      where.VendorId = Number(vendorId);
-    if (userId)        where.UserId = Number(userId);
-
-    const { count, rows } = await Order.findAndCountAll({
-      where,
-      include: [
-        { model: Vendor, attributes: ["id", "name", "commissionRate"] },
-        { model: User,   attributes: ["id", "name", "email"] },
-      ],
-      order: [["createdAt", "DESC"]],
-      limit: ps,
-      offset: (p - 1) * ps,
-    });
-
-    const items = rows.map((o) => {
-      const rate = (o.Vendor && o.Vendor.commissionRate != null)
-        ? Number(o.Vendor.commissionRate)
-        : Number(process.env.COMMISSION_PCT || 0.15);
-      const gross = Number(o.totalAmount || 0);
-      const commissionAmount = +(gross * rate).toFixed(2);
-      return {
-        ...o.toJSON(),
-        commissionAmount,
-        commissionRate: rate,
-      };
-    });
-
-    return res.json({
-      items,
-      total: count,
-      page: p,
-      pageSize: ps,
-      totalPages: Math.ceil(count / ps),
-    });
-  } catch (err) {
-    return res.status(500).json({ message: "Failed to fetch admin orders", error: err.message });
+/* ----------------- DEBUG: scan my vendors & counts ----------------- */
+router.get(
+  "/vendor/debug/scan",
+  authenticateToken,
+  requireVendor,
+  ensureVendorProfile,
+  async (req, res) => {
+    try {
+      const ids = await buildVendorScope(req);
+      const perVendor = {};
+      for (const id of ids) {
+        perVendor[id] = await Order.count({ where: { VendorId: id } });
+      }
+      res.json({ userId: req.user.id, vendorIds: ids, perVendor });
+    } catch (e) {
+      res.status(500).json({ message: "debug scan failed", error: e.message });
+    }
   }
-});
+);
 
 module.exports = router;
+
