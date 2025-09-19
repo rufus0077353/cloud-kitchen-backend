@@ -1,12 +1,16 @@
-
-// routes/vendorRoutes.js
 const express = require("express");
 const router = express.Router();
 
-const { Op } = require("sequelize");
 const { Vendor, MenuItem, Order } = require("../models");
+const { Op } = require("sequelize");
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
+
+/* helper: all vendor ids for this user */
+async function allVendorIdsForUser(userId) {
+  const rows = await Vendor.findAll({ where: { UserId: userId }, attributes: ["id"] });
+  return rows.map(r => Number(r.id)).filter(Number.isFinite);
+}
 
 /* ----------------- WHO AM I ----------------- */
 router.get(
@@ -46,7 +50,6 @@ router.patch(
       vendor.isOpen = isOpen;
       await vendor.save();
 
-      // Broadcast status change
       const io = req.app.get("io");
       if (io) io.emit("vendor:status", { vendorId: vendor.id, isOpen: vendor.isOpen });
 
@@ -82,7 +85,7 @@ router.post("/", authenticateToken, async (req, res) => {
       name,
       location,
       cuisine,
-      UserId: UserId || req.user.id, // auto-link if not provided
+      UserId: UserId || req.user.id,
       isOpen: true,
       phone: phone || null,
       logoUrl: logoUrl || null,
@@ -169,77 +172,38 @@ router.delete("/:id", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- PAYOUTS (ALIASES FOR FRONTEND) ----------------- */
-/* GET /api/vendors/:vendorId/payouts  -> same summary your UI expects */
+/* --------- COMPAT: payouts under /vendors/:id/payouts (old UI calls) --------- */
 router.get(
-  "/:vendorId/payouts",
+  "/:id/payouts",
   authenticateToken,
   requireVendor,
   ensureVendorProfile,
   async (req, res) => {
     try {
-      const vendorId = Number(req.params.vendorId);
-      if (!Number.isFinite(vendorId)) {
-        return res.status(400).json({ message: "Invalid vendor id" });
+      const idNum = Number(req.params.id);
+      const myIds = await allVendorIdsForUser(req.user.id);
+      if (!myIds.includes(idNum)) {
+        return res.status(403).json({ message: "Not your vendor" });
       }
-
-      // authorize: must be this vendor or admin
-      const isAuthorized = req.vendor?.id === vendorId || req.user?.role === "admin";
-      if (!isAuthorized) return res.status(403).json({ message: "Not authorized" });
-
-      const { from, to } = req.query;
       const where = {
-        VendorId: vendorId,
+        VendorId: idNum,
         status: { [Op.notIn]: ["rejected", "canceled"] },
+        paymentStatus: "paid",
       };
-      if (from || to) {
-        where.createdAt = {};
-        if (from) where.createdAt[Op.gte] = new Date(from);
-        if (to)   where.createdAt[Op.lte] = new Date(to);
-      }
-
-      const COMMISSION_PCT = Number(process.env.COMMISSION_PCT || 0.15);
-
-      const grossPaid =
-        (await Order.sum("totalAmount", { where: { ...where, paymentStatus: "paid" } })) || 0;
-      const paidOrders = await Order.count({
-        where: { ...where, paymentStatus: "paid" },
-      });
-      const unpaidGross =
-        (await Order.sum("totalAmount", {
-          where: { ...where, paymentStatus: { [Op.ne]: "paid" } },
-        })) || 0;
-
-      const commission = +(grossPaid * COMMISSION_PCT).toFixed(2);
+      const grossPaid = await Order.sum("totalAmount", { where }) || 0;
+      const paidOrders = await Order.count({ where });
+      const commission = +(grossPaid * Number(process.env.COMMISSION_PCT || 0.15)).toFixed(2);
       const netOwed = +(grossPaid - commission).toFixed(2);
-
-      return res.json({
-        vendorId,
-        dateRange: { from: from || null, to: to || null },
-        rate: COMMISSION_PCT,
+      res.json({
+        vendorId: idNum,
         paidOrders,
         grossPaid: +grossPaid.toFixed(2),
         commission,
         netOwed,
-        grossUnpaid: +unpaidGross.toFixed(2),
       });
-    } catch (err) {
-      return res
-        .status(500)
-        .json({ message: "Failed to build payouts summary", error: err.message });
+    } catch (e) {
+      res.status(500).json({ message: "Failed to build payouts", error: e.message });
     }
-  }
-);
-
-/* Optional: GET /api/vendors/me/payouts */
-router.get(
-  "/me/payouts",
-  authenticateToken,
-  requireVendor,
-  ensureVendorProfile,
-  async (req, res) => {
-    req.params.vendorId = String(req.vendor.id);
-    return router.handle(req, res); // reuse the handler above
   }
 );
 
