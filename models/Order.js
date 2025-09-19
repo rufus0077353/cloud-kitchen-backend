@@ -1,27 +1,49 @@
 // models/Order.js
 module.exports = (sequelize, DataTypes) => {
-  const Order = sequelize.define("Order", {
-    totalAmount:  { type: DataTypes.FLOAT,  allowNull: false },
-    status:       { type: DataTypes.STRING, allowNull: false, defaultValue: "pending" }, // business status
-    UserId:       { type: DataTypes.INTEGER, allowNull: false },
-    VendorId:     { type: DataTypes.INTEGER, allowNull: false },
+const Order = sequelize.define(
+  "Order",
+  {
+    totalAmount: { type: DataTypes.FLOAT, allowNull: false },
+    status: { type: DataTypes.STRING, allowNull: false, defaultValue: "pending" },
+    UserId: { type: DataTypes.INTEGER, allowNull: false },
+    VendorId: { type: DataTypes.INTEGER, allowNull: false },
 
-    // --- Payment fields (mock + future real gateways) ---
+    // Payment
     paymentMethod: {
-      type: DataTypes.STRING,                 // e.g. 'cod', 'mock_online', 'razorpay', 'stripe'
+      type: DataTypes.STRING, // 'cod' | 'mock_online' | 'razorpay' | 'stripe' etc.
       allowNull: false,
       defaultValue: "cod",
     },
     paymentStatus: {
-      type: DataTypes.STRING,                 // 'unpaid' | 'processing' | 'paid' | 'failed' | 'refunded'
+      type: DataTypes.STRING, // 'unpaid' | 'processing' | 'paid' | 'failed' | 'refunded'
       allowNull: false,
       defaultValue: "unpaid",
     },
-    // you could add paymentRef / txnId later for real gateways
-  }, {
+    paidAt: { type: DataTypes.DATE, allowNull: true },
+    note: { type: DataTypes.TEXT, allowNull: true },
+    address: { type: DataTypes.TEXT, allowNull: true },
+  },
+  {
     tableName: "orders",
     timestamps: true,
+  }
+);
+
+// Associations (needed for includes in routes/UI)
+Order.associate = (models) => {
+  Order.belongsTo(models.User, { foreignKey: "UserId" });
+  Order.belongsTo(models.Vendor, { foreignKey: "VendorId" });
+
+  // Many-to-many with MenuItem through OrderItem
+  Order.belongsToMany(models.MenuItem, {
+    through: models.OrderItem,
+    foreignKey: "OrderId",
+    otherKey: "MenuItemId",
   });
 
-  return Order;
+  // Explicit convenience
+  Order.hasMany(models.OrderItem, { foreignKey: "OrderId" });
+};
+
+return Order;
 };
