@@ -1,3 +1,4 @@
+
 const express = require("express");
 const router = express.Router();
 const { Op } = require("sequelize");
@@ -54,11 +55,9 @@ async function audit(req, { action, order = null, details = {} }) {
 /* ----------------- helpers ----------------- */
 function parsePageParams(q) {
   const pageRaw = Number(q.page);
-  const page = Number.isFinite(pageRaw) ? Math.max(0, pageRaw) : 0;
+  const page = Number.isFinite(pageRaw) ? Math.max(1, pageRaw) : 1;
   const pageSizeRaw = Number(q.pageSize);
-  const pageSize = Number.isFinite(pageSizeRaw)
-    ? Math.min(100, Math.max(1, pageSizeRaw))
-    : 20;
+  const pageSize = Number.isFinite(pageSizeRaw) ? Math.min(100, Math.max(1, pageSizeRaw)) : 20;
   return { page, pageSize };
 }
 
@@ -71,6 +70,19 @@ async function buildVendorScope(req) {
   const ids = vendors.map(v => Number(v.id)).filter(Number.isFinite);
   if (req.vendor?.id && !ids.includes(Number(req.vendor.id))) ids.push(Number(req.vendor.id));
   return ids.length ? ids : [-1];
+}
+
+// Resolve vendorId in this priority: ?vendorId -> token -> DB (UserId -> Vendor)
+async function resolveVendorId(req) {
+  if (req.query?.vendorId) return Number(req.query.vendorId);
+  if (req.user?.VendorId) return Number(req.user.VendorId);
+  try {
+    if (req.user?.id) {
+      const v = await Vendor.findOne({ where: { UserId: req.user.id }, attributes: ["id"] });
+      if (v?.id) return Number(v.id);
+    }
+  } catch {}
+  return null;
 }
 
 // ---- idempotency helpers (safe if table/model missing) ----
@@ -97,7 +109,6 @@ async function safeCreateIdempotencyKey(record, t) {
   }
 }
 
-
 /* ----------------- user orders (always object shape) ----------------- */
 router.get("/my", authenticateToken, async (req, res) => {
   try {
@@ -107,7 +118,7 @@ router.get("/my", authenticateToken, async (req, res) => {
       { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
     ];
 
-    if (page > 0) {
+    if (page > 1 || (req.query.page && Number(req.query.page) >= 1)) {
       const { count, rows } = await Order.findAndCountAll({
         where: { UserId: req.user.id },
         include: baseInclude,
@@ -141,25 +152,18 @@ router.get("/my", authenticateToken, async (req, res) => {
   }
 });
 
-
 /**
  * GET /api/orders/vendor/summary
  * Return summary stats for the logged-in vendor
  */
 router.get("/vendor/summary", authenticateToken, async (req, res) => {
   try {
-    // vendorId should come from req.user if vendor account, else use query
-    const vendorId = req.query.vendorId || req.user?.VendorId;
+    const vendorId = await resolveVendorId(req);
     if (!vendorId) return res.status(400).json({ message: "Missing vendorId" });
 
-    const today = new Date();
-    today.setHours(0,0,0,0);
-
-    const weekAgo = new Date();
-    weekAgo.setDate(weekAgo.getDate() - 7);
-
-    const monthAgo = new Date();
-    monthAgo.setDate(1);
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
+    const monthAgo = new Date(); monthAgo.setDate(1);
 
     const [todayOrders, weekOrders, monthOrders, totalOrders] = await Promise.all([
       Order.findAll({ where: { VendorId: vendorId, createdAt: { [Op.gte]: today } } }),
@@ -171,12 +175,12 @@ router.get("/vendor/summary", authenticateToken, async (req, res) => {
     const sum = (arr) => arr.reduce((s, o) => s + Number(o.totalAmount || 0), 0);
 
     res.json({
-      today: { orders: todayOrders.length, revenue: sum(todayOrders) },
-      week: { orders: weekOrders.length, revenue: sum(weekOrders) },
-      month: { orders: monthOrders.length, revenue: sum(monthOrders) },
-      totals: { orders: totalOrders.length, revenue: sum(totalOrders) },
+      today:  { orders: todayOrders.length,  revenue: sum(todayOrders)  },
+      week:   { orders: weekOrders.length,   revenue: sum(weekOrders)   },
+      month:  { orders: monthOrders.length,  revenue: sum(monthOrders)  },
+      totals: { orders: totalOrders.length,  revenue: sum(totalOrders)  },
       byStatus: totalOrders.reduce((map, o) => {
-        const st = o.status || "pending";
+        const st = (o.status || "pending").toLowerCase();
         map[st] = (map[st] || 0) + 1;
         return map;
       }, {}),
@@ -192,12 +196,11 @@ router.get("/vendor/summary", authenticateToken, async (req, res) => {
  */
 router.get("/vendor/daily", authenticateToken, async (req, res) => {
   try {
-    const vendorId = req.query.vendorId || req.user?.VendorId;
+    const vendorId = await resolveVendorId(req);
     if (!vendorId) return res.status(400).json({ message: "Missing vendorId" });
 
-    const days = parseInt(req.query.days) || 14;
-    const since = new Date();
-    since.setDate(since.getDate() - days);
+    const days = parseInt(req.query.days, 10) || 14;
+    const since = new Date(); since.setDate(since.getDate() - days);
 
     const orders = await Order.findAll({
       where: { VendorId: vendorId, createdAt: { [Op.gte]: since } },
@@ -206,14 +209,13 @@ router.get("/vendor/daily", authenticateToken, async (req, res) => {
 
     const agg = {};
     for (const o of orders) {
-      const d = o.createdAt.toISOString().slice(0, 10); // yyyy-mm-dd
+      const d = o.createdAt.toISOString().slice(0, 10); // YYYY-MM-DD
       if (!agg[d]) agg[d] = { date: d, orders: 0, revenue: 0 };
       agg[d].orders += 1;
       agg[d].revenue += Number(o.totalAmount || 0);
     }
 
-    const out = Object.values(agg).sort((a, b) => new Date(a.date) - new Date(b.date));
-    res.json(out);
+    res.json(Object.values(agg).sort((a, b) => new Date(a.date) - new Date(b.date)));
   } catch (err) {
     res.status(500).json({ message: "Error fetching vendor daily stats", error: err.message });
   }
@@ -225,11 +227,10 @@ router.get("/vendor/daily", authenticateToken, async (req, res) => {
  */
 router.get("/vendor", authenticateToken, async (req, res) => {
   try {
-    const vendorId = req.query.vendorId || req.user?.VendorId;
+    const vendorId = await resolveVendorId(req);
     if (!vendorId) return res.status(400).json({ message: "Missing vendorId" });
 
-    const page = parseInt(req.query.page) || 1;
-    const pageSize = parseInt(req.query.pageSize) || 50;
+    const { page, pageSize } = parsePageParams(req.query);
 
     const { count, rows } = await Order.findAndCountAll({
       where: { VendorId: vendorId },
@@ -245,7 +246,7 @@ router.get("/vendor", authenticateToken, async (req, res) => {
       limit: pageSize,
     });
 
-    res.json({ items: rows, total: count, page, pageSize });
+    res.json({ items: rows, total: count, page, pageSize, totalPages: Math.ceil(count / pageSize) });
   } catch (err) {
     res.status(500).json({ message: "Error fetching vendor orders", error: err.message });
   }
@@ -287,7 +288,7 @@ router.get("/:id", authenticateToken, async (req, res) => {
     if (!order) return res.status(404).json({ message: "Order not found" });
 
     const role = req.user?.role || "user";
-    const isOwnerUser   = Number(order.UserId)   === Number(req.user.id);
+    const isOwnerUser   = Number(order.UserId) === Number(req.user.id);
     const vendorIdClaim = req.vendor?.id || req.user?.vendorId;
     const isOwnerVendor = vendorIdClaim && Number(order.VendorId) === Number(vendorIdClaim);
     const isAdmin       = role === "admin";
@@ -788,7 +789,31 @@ async function buildInvoiceHtml(order) {
   const createdAt = order.createdAt ? new Date(order.createdAt).toLocaleString("en-IN") : "-";
 
   return `<!DOCTYPE html>
-<html lang="en"> ... (unchanged HTML) ... </html>`;
+<html lang="en">
+  <head><meta charset="utf-8"><title>Invoice #${order.id}</title>
+  <style>
+    body{font-family:Arial,Helvetica,sans-serif;margin:24px;color:#222}
+    h1{margin:0 0 8px 0} .muted{color:#666}.right{text-align:right}
+    table{border-collapse:collapse;width:100%;margin-top:12px}
+    th,td{border:1px solid #ddd;padding:8px}
+    th{background:#f7f7f7}
+  </style></head>
+  <body>
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div><h1>Invoice #${order.id}</h1>
+      <div class="muted">Created: ${createdAt}</div></div>
+      ${LOGO ? `<img src="${LOGO}" alt="logo" style="height:48px">` : ""}
+    </div>
+    <p><strong>User:</strong> ${escapeHtml(order.User?.name || "-")} (${escapeHtml(order.User?.email || "-")})</p>
+    <p><strong>Vendor:</strong> ${escapeHtml(order.Vendor?.name || "-")} (${escapeHtml(order.Vendor?.cuisine || "-")})</p>
+    <table>
+      <thead><tr><th>Item</th><th class="right">Qty</th><th class="right">Price</th><th class="right">Total</th></tr></thead>
+      <tbody>${rowsHtml || `<tr><td colspan="4" class="muted">No items</td></tr>`}</tbody>
+    </table>
+    <p><strong>Subtotal:</strong> ${fmtINR(computedSubTotal)}</p>
+    <p><strong>Payment:</strong> ${escapeHtml(paymentMethod)} · ${escapeHtml(paymentStatus)} ${paidAt ? `· Paid at ${paidAt}` : ""}</p>
+  </body>
+</html>`;
 }
 
 /* ----------------- HTML invoice ----------------- */
@@ -961,4 +986,3 @@ router.get(
 );
 
 module.exports = router;
-
