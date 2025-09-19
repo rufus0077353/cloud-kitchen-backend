@@ -1,4 +1,5 @@
 
+// routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
 const { Op } = require("sequelize");
@@ -10,7 +11,7 @@ const {
   Vendor,
   MenuItem,
   User,
-  Payout, // may be missing; guarded where used
+  Payout, // optional
 } = require("../models");
 
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
@@ -22,7 +23,7 @@ const { notifyUser } = require("../utils/notifications");
 const COMMISSION_PCT = Number(process.env.COMMISSION_PCT || 0.15);
 let Puppeteer = null; try { Puppeteer = require("puppeteer"); } catch {}
 
-/* ----------------- socket helpers ----------------- */
+/* ---------- socket helpers ---------- */
 function emitToVendorHelper(req, vendorId, event, payload) {
   const fn = req.emitToVendor || req.app.get("emitToVendor");
   if (typeof fn === "function") fn(vendorId, event, payload);
@@ -32,7 +33,7 @@ function emitToUserHelper(req, userId, event, payload) {
   if (typeof fn === "function") fn(userId, event, payload);
 }
 
-/* ----------------- safe inline audit logger ----------------- */
+/* ---------- audit (safe) ---------- */
 async function audit(req, { action, order = null, details = {} }) {
   try {
     const { AuditLog } = require("../models");
@@ -52,7 +53,7 @@ async function audit(req, { action, order = null, details = {} }) {
   }
 }
 
-/* ----------------- helpers ----------------- */
+/* ---------- helpers ---------- */
 function parsePageParams(q) {
   const pageRaw = Number(q.page);
   const page = Number.isFinite(pageRaw) ? Math.max(1, pageRaw) : 1;
@@ -72,10 +73,21 @@ async function buildVendorScope(req) {
   return ids.length ? ids : [-1];
 }
 
-// Resolve vendorId in this priority: ?vendorId -> token -> DB (UserId -> Vendor)
+// Robust vendorId resolver: query -> token/middleware -> DB lookup
 async function resolveVendorId(req) {
-  if (req.query?.vendorId) return Number(req.query.vendorId);
-  if (req.user?.VendorId) return Number(req.user.VendorId);
+  // 1) explicit query param
+  if (req.query?.vendorId && Number.isFinite(Number(req.query.vendorId))) {
+    return Number(req.query.vendorId);
+  }
+  // 2) token/middleware common shapes
+  const candidates = [
+    req.user?.VendorId,
+    req.user?.vendorId,
+    req.user?.vendor?.id,
+    req.vendor?.id,
+  ].map(n => Number(n)).filter(n => Number.isFinite(n));
+  if (candidates.length) return candidates[0];
+  // 3) DB fallback by UserId
   try {
     if (req.user?.id) {
       const v = await Vendor.findOne({ where: { UserId: req.user.id }, attributes: ["id"] });
@@ -109,7 +121,7 @@ async function safeCreateIdempotencyKey(record, t) {
   }
 }
 
-/* ----------------- user orders (always object shape) ----------------- */
+/* ===================== USER: MY ORDERS ===================== */
 router.get("/my", authenticateToken, async (req, res) => {
   try {
     const { page, pageSize } = parsePageParams(req.query);
@@ -118,7 +130,7 @@ router.get("/my", authenticateToken, async (req, res) => {
       { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
     ];
 
-    if (page > 1 || (req.query.page && Number(req.query.page) >= 1)) {
+    if (page > 1) {
       const { count, rows } = await Order.findAndCountAll({
         where: { UserId: req.user.id },
         include: baseInclude,
@@ -152,9 +164,9 @@ router.get("/my", authenticateToken, async (req, res) => {
   }
 });
 
+/* ===================== VENDOR SUMMARY ===================== */
 /**
  * GET /api/orders/vendor/summary
- * Return summary stats for the logged-in vendor
  */
 router.get("/vendor/summary", authenticateToken, async (req, res) => {
   try {
@@ -175,6 +187,7 @@ router.get("/vendor/summary", authenticateToken, async (req, res) => {
     const sum = (arr) => arr.reduce((s, o) => s + Number(o.totalAmount || 0), 0);
 
     res.json({
+      vendorIdUsed: vendorId, // helpful for debugging
       today:  { orders: todayOrders.length,  revenue: sum(todayOrders)  },
       week:   { orders: weekOrders.length,   revenue: sum(weekOrders)   },
       month:  { orders: monthOrders.length,  revenue: sum(monthOrders)  },
@@ -190,9 +203,9 @@ router.get("/vendor/summary", authenticateToken, async (req, res) => {
   }
 });
 
+/* ===================== VENDOR DAILY ===================== */
 /**
  * GET /api/orders/vendor/daily?days=14
- * Return daily aggregated orders for a vendor
  */
 router.get("/vendor/daily", authenticateToken, async (req, res) => {
   try {
@@ -215,15 +228,18 @@ router.get("/vendor/daily", authenticateToken, async (req, res) => {
       agg[d].revenue += Number(o.totalAmount || 0);
     }
 
-    res.json(Object.values(agg).sort((a, b) => new Date(a.date) - new Date(b.date)));
+    res.json({
+      vendorIdUsed: vendorId,
+      items: Object.values(agg).sort((a, b) => new Date(a.date) - new Date(b.date)),
+    });
   } catch (err) {
     res.status(500).json({ message: "Error fetching vendor daily stats", error: err.message });
   }
 });
 
+/* ===================== VENDOR ORDERS (paginated) ===================== */
 /**
  * GET /api/orders/vendor
- * Paginated vendor orders for top items etc
  */
 router.get("/vendor", authenticateToken, async (req, res) => {
   try {
@@ -246,13 +262,20 @@ router.get("/vendor", authenticateToken, async (req, res) => {
       limit: pageSize,
     });
 
-    res.json({ items: rows, total: count, page, pageSize, totalPages: Math.ceil(count / pageSize) });
+    res.json({
+      vendorIdUsed: vendorId,
+      items: rows,
+      total: count,
+      page,
+      pageSize,
+      totalPages: Math.ceil(count / pageSize)
+    });
   } catch (err) {
     res.status(500).json({ message: "Error fetching vendor orders", error: err.message });
   }
 });
 
-/* ----------------- vendor (any) orders by id (legacy) ----------------- */
+/* ===================== VENDOR ORDERS (legacy by param) ===================== */
 router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
   try {
     const idNum = Number(req.params.vendorId);
@@ -272,7 +295,7 @@ router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- GET one order ----------------- */
+/* ===================== GET ONE ORDER ===================== */
 router.get("/:id", authenticateToken, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -303,7 +326,7 @@ router.get("/:id", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- create order (user) ----------------- */
+/* ===================== CREATE ORDER ===================== */
 router.post("/", authenticateToken, async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -354,7 +377,7 @@ router.post("/", authenticateToken, async (req, res) => {
       cleanItems.push({ MenuItemId: mid, quantity: qty });
     }
 
-    // Load menu items to ensure all belong to this vendor + get prices
+    // Ensure all items belong to this vendor + get prices
     const menuRows = await MenuItem.findAll({
       where: { id: ids, VendorId: vendorIdNum },
       attributes: ["id", "price", "name", "VendorId"],
@@ -405,15 +428,14 @@ router.post("/", authenticateToken, async (req, res) => {
       { transaction: t }
     );
 
-    /* >>> AUTO-PAY FOR MOCK ONLINE <<< */
+    // Auto-pay for mock online
     if (paymentMethod === "mock_online") {
       order.paymentStatus = "paid";
       order.paidAt = new Date();
       await order.save({ transaction: t });
     }
-    /* >>> END AUTO-PAY <<< */
 
-    // STEP 2: store idempotency key (safe if table missing)
+    // idempotency key store
     if (idemKey) {
       await safeCreateIdempotencyKey({ key: idemKey, userId: req.user.id, orderId: order.id }, t);
     }
@@ -434,7 +456,6 @@ router.post("/", authenticateToken, async (req, res) => {
     emitToVendorHelper(req, vendorIdNum, "order:new", fullOrder);
     emitToUserHelper(req, req.user.id, "order:new", fullOrder);
 
-    /* >>> EMIT PAYMENT EVENT IF PAID <<< */
     if (fullOrder.paymentStatus === "paid") {
       const payPayload = { id: fullOrder.id, paymentStatus: fullOrder.paymentStatus, paidAt: fullOrder.paidAt };
       emitToVendorHelper(req, vendorIdNum, "order:payment", payPayload);
@@ -450,9 +471,7 @@ router.post("/", authenticateToken, async (req, res) => {
         console.warn("push notify failed:", e?.message);
       }
     }
-    /* >>> END EMIT <<< */
 
-    // Audit
     await audit(req, {
       action: "ORDER_CREATED",
       order: fullOrder,
@@ -461,7 +480,7 @@ router.post("/", authenticateToken, async (req, res) => {
 
     return res.status(201).json(fullOrder);
   } catch (err) {
-    try { await t.rollback(); } catch (_) {}
+    try { await t.rollback(); } catch {}
     console.error("POST /api/orders error:", err?.name, err?.message);
     if (err?.name === "SequelizeForeignKeyConstraintError") {
       return res.status(400).json({
@@ -476,7 +495,7 @@ router.post("/", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- user cancel (soft) ----------------- */
+/* ===================== USER CANCEL ===================== */
 router.patch("/:id/cancel", authenticateToken, async (req, res) => {
   try {
     const orderId = Number(req.params.id);
@@ -528,7 +547,7 @@ router.patch("/:id/cancel", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- update (admin/legacy), delete, filter ----------------- */
+/* ===================== UPDATE (legacy/admin) ===================== */
 router.put("/:id", authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { totalAmount, items } = req.body;
@@ -554,7 +573,7 @@ router.put("/:id", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- vendor updates order status ----------------- */
+/* ===================== VENDOR: UPDATE STATUS ===================== */
 router.patch(
   "/:id/status",
   authenticateToken,
@@ -592,6 +611,7 @@ router.patch(
         console.warn("push notify failed:", e?.message);
       }
 
+      // create/update payout when delivered & paid
       if (statusRaw === "delivered" && order.paymentStatus === "paid" && Payout?.upsert) {
         const gross = Number(order.totalAmount || 0);
         const rate =
@@ -627,7 +647,7 @@ router.patch(
   }
 );
 
-/* ----------------- hard delete ----------------- */
+/* ===================== HARD DELETE ===================== */
 router.delete("/:id", authenticateToken, async (req, res) => {
   try {
     const order = await Order.findByPk(req.params.id);
@@ -648,7 +668,7 @@ router.delete("/:id", authenticateToken, async (req, res) => {
   }
 });
 
-/* ====== FILTER (GET/POST) ====== */
+/* ===================== FILTER (GET/POST) ===================== */
 async function filterHandler(req, res) {
   const src = req.method === "GET" ? req.query : req.body;
   const { UserId, VendorId, status, startDate, endDate } = src;
@@ -681,7 +701,7 @@ async function filterHandler(req, res) {
 router.get("/filter", authenticateToken, filterHandler);
 router.post("/filter", authenticateToken, filterHandler);
 
-/* ----------------- payment status ----------------- */
+/* ===================== PAYMENT STATUS ===================== */
 router.patch("/:id/payment", authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
@@ -702,7 +722,7 @@ router.patch("/:id/payment", authenticateToken, async (req, res) => {
       try {
         const v = await Vendor.findOne({ where: { UserId: req.user.id }, attributes: ["id"] });
         if (v) vendorIdClaim = v.id;
-      } catch (_) {}
+      } catch {}
     }
     const isOwnerVendor = vendorIdClaim && Number(order.VendorId) === Number(vendorIdClaim);
     const isAdmin = role === "admin";
@@ -755,7 +775,7 @@ router.patch("/:id/payment", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- invoice helpers + routes ----------------- */
+/* ===================== INVOICE: HTML ===================== */
 async function buildInvoiceHtml(order) {
   const escapeHtml = (s = "") =>
     String(s)
@@ -816,7 +836,6 @@ async function buildInvoiceHtml(order) {
 </html>`;
 }
 
-/* ----------------- HTML invoice ----------------- */
 router.get("/:id/invoice", authenticateToken, async (req, res) => {
   try {
     const order = await Order.findByPk(req.params.id, {
@@ -837,7 +856,7 @@ router.get("/:id/invoice", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- PDF invoice (optional puppeteer) ----------------- */
+/* ===================== INVOICE: PDF (optional) ===================== */
 router.get("/:id/invoice.pdf", authenticateToken, async (req, res) => {
   if (!Puppeteer) {
     return res.status(501).json({ message: "PDF generation not enabled. Install 'puppeteer'." });
@@ -873,7 +892,7 @@ router.get("/:id/invoice.pdf", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- VENDOR PAYOUTS SUMMARY (uses all VendorIds) ----------------- */
+/* ===================== PAYOUTS SUMMARY (VENDOR) ===================== */
 router.get(
   "/payouts/summary",
   authenticateToken,
@@ -901,7 +920,7 @@ router.get(
       const netOwed    = +(grossPaid - commission).toFixed(2);
 
       return res.json({
-        vendorId: req.vendor.id,
+        vendorIdsUsed: vendorIds,
         dateRange: { from: from || null, to: to || null },
         rate: COMMISSION_PCT,
         paidOrders,
@@ -916,7 +935,7 @@ router.get(
   }
 );
 
-/* ----------------- ADMIN: all vendor summaries ----------------- */
+/* ===================== PAYOUTS SUMMARY (ADMIN) ===================== */
 router.get("/payouts/summary/all", authenticateToken, async (req, res) => {
   try {
     if (req.user?.role !== "admin") return res.status(403).json({ message: "Admin only" });
@@ -965,7 +984,7 @@ router.get("/payouts/summary/all", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- DEBUG: scan my vendors & counts ----------------- */
+/* ===================== DEBUG: SCAN VENDORS ===================== */
 router.get(
   "/vendor/debug/scan",
   authenticateToken,
