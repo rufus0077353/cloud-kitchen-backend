@@ -1,34 +1,37 @@
-// models/Vendor.js (excerpt)
+// models/Vendor.js
 module.exports = (sequelize, DataTypes) => {
   const Vendor = sequelize.define(
     "Vendor",
     {
-      name:       { type: DataTypes.STRING, allowNull: false },
-      cuisine:    { type: DataTypes.STRING, allowNull: true },
-      location:   { type: DataTypes.STRING, allowNull: true },
-      phone:      { type: DataTypes.STRING, allowNull: true },
-      logoUrl:    { type: DataTypes.STRING, allowNull: true },
-      isOpen:     { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
-      isDeleted:  { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+      name:      { type: DataTypes.STRING, allowNull: false },
+      location:  { type: DataTypes.STRING, allowNull: false },
+      cuisine:   { type: DataTypes.STRING, allowNull: false },
+      isOpen:    { type: DataTypes.BOOLEAN, defaultValue: true },
+      phone:     { type: DataTypes.STRING, allowNull: true },
+      logoUrl:   { type: DataTypes.STRING, allowNull: true },
 
-      // 🔒 one vendor per user
-      UserId:         { type: DataTypes.INTEGER, allowNull: false, unique: true },
-      commissionRate: { type: DataTypes.FLOAT, allowNull: true, defaultValue: 0.15 },
+      // TEMPORARY HOTFIX: allow null so server can boot and we can clean orphans
+      UserId: {
+        type: DataTypes.INTEGER,
+        allowNull: true, // ← change back to false in Step 3 after cleanup
+        references: { model: "users", key: "id" },
+        onDelete: "CASCADE",
+        onUpdate: "CASCADE",
+      },
+
+      // soft-delete flag (used by routes I gave you)
+      isDeleted: { type: DataTypes.BOOLEAN, defaultValue: false },
     },
     {
       tableName: "vendors",
-      underscored: true,
       timestamps: true,
-      indexes: [
-        { unique: true, fields: ["UserId"] }, // DB-level protection
-      ],
     }
   );
 
   Vendor.associate = (models) => {
-    Vendor.belongsTo(models.User,   { foreignKey: "UserId" });
+    Vendor.belongsTo(models.User, { foreignKey: "UserId" });
     Vendor.hasMany(models.MenuItem, { foreignKey: "VendorId" });
-    Vendor.hasMany(models.Order,    { foreignKey: "VendorId" });
+    Vendor.hasMany(models.Order, { foreignKey: "VendorId" });
   };
 
   return Vendor;
