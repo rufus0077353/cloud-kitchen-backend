@@ -21,7 +21,8 @@ const { notifyUser } = require("../utils/notifications");
 
 /* ---------- config / optional deps ---------- */
 const COMMISSION_PCT = Number(process.env.COMMISSION_PCT || 0.15);
-let Puppeteer = null; try { Puppeteer = require("puppeteer"); } catch {}
+let Puppeteer = null;
+try { Puppeteer = require("puppeteer"); } catch {}
 
 /* ---------- socket helpers ---------- */
 function emitToVendorHelper(req, vendorId, event, payload) {
@@ -165,9 +166,6 @@ router.get("/my", authenticateToken, async (req, res) => {
 });
 
 /* ===================== VENDOR SUMMARY ===================== */
-/**
- * GET /api/orders/vendor/summary
- */
 router.get("/vendor/summary", authenticateToken, async (req, res) => {
   try {
     const vendorId = await resolveVendorId(req);
@@ -187,7 +185,7 @@ router.get("/vendor/summary", authenticateToken, async (req, res) => {
     const sum = (arr) => arr.reduce((s, o) => s + Number(o.totalAmount || 0), 0);
 
     res.json({
-      vendorIdUsed: vendorId, // helpful for debugging
+      vendorIdUsed: vendorId, // debug
       today:  { orders: todayOrders.length,  revenue: sum(todayOrders)  },
       week:   { orders: weekOrders.length,   revenue: sum(weekOrders)   },
       month:  { orders: monthOrders.length,  revenue: sum(monthOrders)  },
@@ -204,9 +202,6 @@ router.get("/vendor/summary", authenticateToken, async (req, res) => {
 });
 
 /* ===================== VENDOR DAILY ===================== */
-/**
- * GET /api/orders/vendor/daily?days=14
- */
 router.get("/vendor/daily", authenticateToken, async (req, res) => {
   try {
     const vendorId = await resolveVendorId(req);
@@ -238,9 +233,6 @@ router.get("/vendor/daily", authenticateToken, async (req, res) => {
 });
 
 /* ===================== VENDOR ORDERS (paginated) ===================== */
-/**
- * GET /api/orders/vendor
- */
 router.get("/vendor", authenticateToken, async (req, res) => {
   try {
     const vendorId = await resolveVendorId(req);
