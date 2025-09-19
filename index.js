@@ -1,4 +1,3 @@
-
 require("dotenv").config();
 
 const express = require("express");
@@ -23,18 +22,17 @@ const app = express();
 const DEFAULT_ORIGINS = [
   "https://servezy.in",
   "https://www.servezy.in",
-  "https://glistening-taffy-7be8bf.netlify.app", // Netlify deploy
+  "https://glistening-taffy-7be8bf.netlify.app",
   "http://localhost:3000",
-  "http://localhost:5173", // vite
+  "http://localhost:5173",
 ];
 
 const FRONTENDS_LIST = (process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(",") : DEFAULT_ORIGINS)
   .map((s) => s.trim())
   .filter(Boolean);
 
-// helper: allow *.netlify.app previews & localhost
 const isAllowedOrigin = (origin) => {
-  if (!origin) return true; // same-origin / curl / health checks
+  if (!origin) return true;
   if (FRONTENDS_LIST.includes(origin)) return true;
   try {
     const u = new URL(origin);
@@ -44,7 +42,6 @@ const isAllowedOrigin = (origin) => {
   return false;
 };
 
-// one place to keep CORS config
 const corsConfig = {
   origin: (origin, cb) => (isAllowedOrigin(origin) ? cb(null, true) : cb(new Error("Not allowed by CORS"))),
   credentials: true,
@@ -55,13 +52,9 @@ const corsConfig = {
 /* =========================
    Proxies & core middleware
    ========================= */
-// Trust proxy (Render/Heroku/NGINX) so websocket upgrade works
 app.set("trust proxy", 1);
 
-// CORS must be early
-app.use(cors(corsConfig));
-// Explicitly answer all preflight requests fast
-app.options("*", cors(corsConfig));
+app.use(cors(corsConfig)); // Handles preflights globally — no explicit app.options('*') needed
 
 app.use(
   helmet({
@@ -88,7 +81,7 @@ app.use(
     max: 800,
     standardHeaders: true,
     legacyHeaders: false,
-    skip: (req) => req.method === "OPTIONS", // don't rate-limit preflight
+    skip: (req) => req.method === "OPTIONS",
   })
 );
 app.use(
@@ -115,21 +108,17 @@ const io = new Server(server, {
   allowEIO3: true,
 });
 
-// simple auth hook (optional)
 io.use((socket, next) => {
   // const token = socket.handshake.auth?.token
-  // TODO: verify if needed
   next();
 });
 
-// socket helpers exposed to routes
 const emitToVendor = (vendorId, event, payload) => vendorId && io.to(`vendor:${vendorId}`).emit(event, payload);
 const emitToUser = (userId, event, payload) => userId && io.to(`user:${userId}`).emit(event, payload);
 app.set("io", io);
 app.set("emitToVendor", emitToVendor);
 app.set("emitToUser", emitToUser);
 
-// Rooms
 io.on("connection", (socket) => {
   console.log("🔌 socket connected", socket.id);
   socket.emit("connected", { id: socket.id });
@@ -155,7 +144,6 @@ const adminRoutes = require("./routes/adminRoutes");
 const pushRoutes = require("./routes/pushRoutes");
 const uploadRoutes = require("./routes/uploadRoutes");
 
-// Optional payments router: support either file name
 let paymentsRouter = null;
 try {
   paymentsRouter = require("./routes/payments");
@@ -190,7 +178,6 @@ mountSafe("/api/admin", adminRoutes);
 mountSafe("/api/uploads", uploadRoutes);
 if (paymentsRouter) mountWithEmit("/api/payments", paymentsRouter);
 
-// Public key endpoint
 app.get("/public-key", (_req, res) => res.json({ publicKey: VAPID_PUBLIC_KEY || "" }));
 
 // Health
@@ -214,7 +201,6 @@ app.use((err, req, res, _next) => {
    Start
    ========================= */
 const PORT = process.env.PORT || 5000;
-// help proxies keep connections alive a bit longer
 server.keepAliveTimeout = 65000;
 server.headersTimeout = 66000;
 
@@ -237,7 +223,6 @@ db.sequelize
     process.exit(1);
   });
 
-// Graceful shutdown
 process.on("SIGTERM", () => {
   console.log("🛑 SIGTERM received, closing server...");
   server.close(() => {
