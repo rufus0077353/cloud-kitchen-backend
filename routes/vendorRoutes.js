@@ -92,23 +92,45 @@ router.get("/", async (_req, res) => {
 router.post("/", authenticateToken, async (req, res) => {
   try {
     const { name, location, cuisine, UserId, phone, logoUrl } = req.body;
+
+    // Require minimum fields on first creation
     if (!name || !location || !cuisine) {
       return res.status(400).json({ message: "Name, location, and cuisine are required" });
     }
 
-    const vendor = await Vendor.create({
-      name,
-      location,
-      cuisine,
-      UserId: UserId || req.user.id,
-      isOpen: true,
-      phone: phone || null,
-      logoUrl: logoUrl || null,
+    // Always tie the vendor to the logged-in user
+    const userId = UserId || req.user.id;
+
+    // Idempotent creation: one vendor per user
+    const [vendor, created] = await Vendor.findOrCreate({
+      where: { UserId: userId },
+      defaults: {
+        name,
+        location,
+        cuisine,
+        isOpen: true,
+        phone: phone || null,
+        logoUrl: logoUrl || null,
+      },
     });
 
-    res.status(201).json({ message: "Vendor created", vendor });
+    // If it already existed, optionally update the basic fields
+    if (!created) {
+      vendor.name     = name     ?? vendor.name;
+      vendor.location = location ?? vendor.location;
+      vendor.cuisine  = cuisine  ?? vendor.cuisine;
+      vendor.phone    = phone    ?? vendor.phone;
+      vendor.logoUrl  = logoUrl  ?? vendor.logoUrl;
+      await vendor.save();
+    }
+
+    return res.status(created ? 201 : 200).json({
+      message: created ? "Vendor created" : "Vendor reused",
+      vendor,
+      created,
+    });
   } catch (err) {
-    res.status(500).json({ message: "Error creating vendor", error: err.message });
+    return res.status(500).json({ message: "Error creating/reusing vendor", error: err.message });
   }
 });
 
