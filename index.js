@@ -1,5 +1,5 @@
+
 require("dotenv").config();
-import { connectSocket } from "./utils/socket"; 
 
 const express = require("express");
 const cors = require("cors");
@@ -21,7 +21,7 @@ const app = express();
 const DEFAULT_ORIGINS = [
   "https://servezy.in",
   "https://www.servezy.in",
-  "https://glistening-taffy-7be8bf.netlify.app", // your current Netlify
+  "https://glistening-taffy-7be8bf.netlify.app", // Netlify deploy
   "http://localhost:3000",
   "http://localhost:5173", // vite
 ];
@@ -89,11 +89,11 @@ app.use(
   })
 );
 
-// ---- HTTP server + Socket.IO (single instance) ----
+// ---- HTTP server + Socket.IO ----
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  path: "/socket.io", // <-- keep this in sync with client
+  path: "/socket.io",
   cors: {
     origin: (origin, cb) => (isAllowedOrigin(origin) ? cb(null, true) : cb(new Error("Not allowed by CORS"))),
     credentials: true,
@@ -101,19 +101,19 @@ const io = new Server(server, {
   },
   pingInterval: 25000,
   pingTimeout: 60000,
-  allowEIO3: true, // ok if any older clients
+  allowEIO3: true,
 });
 
 // simple auth hook (optional)
 io.use((socket, next) => {
-  // const token = socket.handshake.auth?.token || (socket.handshake.headers.authorization || '').replace(/^Bearer\s+/i,'');
-  // TODO: verify token if you want
+  // const token = socket.handshake.auth?.token
+  // TODO: verify if needed
   next();
 });
 
 // socket helpers exposed to routes
 const emitToVendor = (vendorId, event, payload) => vendorId && io.to(`vendor:${vendorId}`).emit(event, payload);
-const emitToUser = (userId, event, payload) => userId && io.to(`user:${userId}`).emit(event, payload);
+const emitToUser   = (userId, event, payload) => userId && io.to(`user:${userId}`).emit(event, payload);
 app.set("io", io);
 app.set("emitToVendor", emitToVendor);
 app.set("emitToUser", emitToUser);
@@ -124,7 +124,7 @@ io.on("connection", (socket) => {
   socket.emit("connected", { id: socket.id });
 
   socket.on("vendor:join", (vendorId) => vendorId && socket.join(`vendor:${vendorId}`));
-  socket.on("user:join", (userId) => userId && socket.join(`user:${userId}`));
+  socket.on("user:join",   (userId)   => userId   && socket.join(`user:${userId}`));
 
   socket.on("disconnect", (reason) => {
     console.log("🔌 socket disconnected:", reason);
@@ -134,15 +134,14 @@ io.on("connection", (socket) => {
 // ---- Routes ----
 const { VAPID_PUBLIC_KEY } = require("./utils/push");
 
-const authRoutes = require("./routes/authRoutes");
-const vendorRoutes = require("./routes/vendorRoutes");
+const authRoutes     = require("./routes/authRoutes");
+const vendorRoutes   = require("./routes/vendorRoutes");
 const menuItemRoutes = require("./routes/menuItemRoutes");
-const orderRoutes = require("./routes/orderRoutes");
-const adminRoutes = require("./routes/adminRoutes");
-const pushRoutes = require("./routes/pushRoutes");
-const uploadRoutes = require("./routes/uploadRoutes");
+const orderRoutes    = require("./routes/orderRoutes");
+const adminRoutes    = require("./routes/adminRoutes");
+const pushRoutes     = require("./routes/pushRoutes");
+const uploadRoutes   = require("./routes/uploadRoutes");
 
-// Optional payments router: support either file name
 let paymentsRouter = null;
 try {
   paymentsRouter = require("./routes/payments");
@@ -154,19 +153,14 @@ try {
   }
 }
 
-// mount helpers
 const mountSafe = (p, r) => (r && typeof r === "function" ? app.use(p, r) : console.warn(`⚠️  Skipped mounting ${p}`));
 const mountWithEmit = (p, r) =>
   r && typeof r === "function"
-    ? app.use(
-        p,
-        (req, _res, next) => {
-          req.emitToVendor = emitToVendor;
-          req.emitToUser = emitToUser;
-          next();
-        },
-        r
-      )
+    ? app.use(p, (req, _res, next) => {
+        req.emitToVendor = emitToVendor;
+        req.emitToUser   = emitToUser;
+        next();
+      }, r)
     : console.warn(`⚠️  Skipped mounting ${p}`);
 
 mountSafe("/api/auth", authRoutes);
@@ -178,7 +172,6 @@ mountSafe("/api/admin", adminRoutes);
 mountSafe("/api/uploads", uploadRoutes);
 if (paymentsRouter) mountWithEmit("/api/payments", paymentsRouter);
 
-// Public key endpoint
 app.get("/public-key", (_req, res) => res.json({ publicKey: VAPID_PUBLIC_KEY || "" }));
 
 // Health
@@ -186,7 +179,7 @@ app.get("/ping", (_req, res) => res.send("pong"));
 app.get("/healthz", (_req, res) => res.status(200).send("ok"));
 app.get("/", (_req, res) => res.send("✅ Cloud Kitchen Backend is live!"));
 
-// 404 fallback (after all routes)
+// 404 fallback
 app.use((req, res) => res.status(404).json({ message: "Route not found" }));
 
 // Global error handler
@@ -200,10 +193,8 @@ app.use((err, req, res, _next) => {
 
 // ---- Start ----
 const PORT = process.env.PORT || 5000;
-
-// help proxies keep connections alive a bit longer
 server.keepAliveTimeout = 65000;
-server.headersTimeout = 66000;
+server.headersTimeout   = 66000;
 
 db.sequelize
   .sync({ alter: true })
@@ -231,4 +222,4 @@ process.on("SIGTERM", () => {
     console.log("👋 Server closed.");
     process.exit(0);
   });
-}); 
+});
