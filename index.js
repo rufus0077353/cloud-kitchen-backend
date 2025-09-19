@@ -1,4 +1,5 @@
 require("dotenv").config();
+import { connectSocket } from "./utils/socket"; 
 
 const express = require("express");
 const cors = require("cors");
@@ -230,4 +231,4 @@ process.on("SIGTERM", () => {
     console.log("👋 Server closed.");
     process.exit(0);
   });
-});
+}); 
