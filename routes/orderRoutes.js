@@ -141,179 +141,115 @@ router.get("/my", authenticateToken, async (req, res) => {
   }
 });
 
-/* ----------------- vendor orders (always object shape) ----------------- */
-router.get(
-  "/vendor",
-  authenticateToken,
-  requireVendor,
-  ensureVendorProfile,
-  async (req, res) => {
-    try {
-      const vendorId = req.vendor.id;
-      const { page, pageSize } = parsePageParams(req.query);
-      const baseInclude = [
-        { model: User, attributes: ["id", "name", "email"] },
-        { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
-      ];
 
-      if (page > 0) {
-        const { count, rows } = await Order.findAndCountAll({
-          where: { VendorId: vendorId },
-          include: baseInclude,
-          order: [["createdAt", "DESC"]],
-          limit: pageSize,
-          offset: (page - 1) * pageSize,
-        });
-        return res.json({
-          items: rows,
-          total: count,
-          page,
-          pageSize,
-          totalPages: Math.ceil(count / pageSize),
-        });
-      }
+/**
+ * GET /api/orders/vendor/summary
+ * Return summary stats for the logged-in vendor
+ */
+router.get("/vendor/summary", authenticateToken, async (req, res) => {
+  try {
+    // vendorId should come from req.user if vendor account, else use query
+    const vendorId = req.query.vendorId || req.user?.VendorId;
+    if (!vendorId) return res.status(400).json({ message: "Missing vendorId" });
 
-      const rows = await Order.findAll({
-        where: { VendorId: vendorId },
-        include: baseInclude,
-        order: [["createdAt", "DESC"]],
-      });
-      return res.json({
-        items: rows,
-        total: rows.length,
-        page: 1,
-        pageSize: rows.length,
-        totalPages: 1,
-      });
-    } catch (err) {
-      res.status(500).json({ message: "Error fetching vendor orders", error: err.message });
+    const today = new Date();
+    today.setHours(0,0,0,0);
+
+    const weekAgo = new Date();
+    weekAgo.setDate(weekAgo.getDate() - 7);
+
+    const monthAgo = new Date();
+    monthAgo.setDate(1);
+
+    const [todayOrders, weekOrders, monthOrders, totalOrders] = await Promise.all([
+      Order.findAll({ where: { VendorId: vendorId, createdAt: { [Op.gte]: today } } }),
+      Order.findAll({ where: { VendorId: vendorId, createdAt: { [Op.gte]: weekAgo } } }),
+      Order.findAll({ where: { VendorId: vendorId, createdAt: { [Op.gte]: monthAgo } } }),
+      Order.findAll({ where: { VendorId: vendorId } }),
+    ]);
+
+    const sum = (arr) => arr.reduce((s, o) => s + Number(o.totalAmount || 0), 0);
+
+    res.json({
+      today: { orders: todayOrders.length, revenue: sum(todayOrders) },
+      week: { orders: weekOrders.length, revenue: sum(weekOrders) },
+      month: { orders: monthOrders.length, revenue: sum(monthOrders) },
+      totals: { orders: totalOrders.length, revenue: sum(totalOrders) },
+      byStatus: totalOrders.reduce((map, o) => {
+        const st = o.status || "pending";
+        map[st] = (map[st] || 0) + 1;
+        return map;
+      }, {}),
+    });
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching vendor summary", error: err.message });
+  }
+});
+
+/**
+ * GET /api/orders/vendor/daily?days=14
+ * Return daily aggregated orders for a vendor
+ */
+router.get("/vendor/daily", authenticateToken, async (req, res) => {
+  try {
+    const vendorId = req.query.vendorId || req.user?.VendorId;
+    if (!vendorId) return res.status(400).json({ message: "Missing vendorId" });
+
+    const days = parseInt(req.query.days) || 14;
+    const since = new Date();
+    since.setDate(since.getDate() - days);
+
+    const orders = await Order.findAll({
+      where: { VendorId: vendorId, createdAt: { [Op.gte]: since } },
+      attributes: ["id", "totalAmount", "createdAt"],
+    });
+
+    const agg = {};
+    for (const o of orders) {
+      const d = o.createdAt.toISOString().slice(0, 10); // yyyy-mm-dd
+      if (!agg[d]) agg[d] = { date: d, orders: 0, revenue: 0 };
+      agg[d].orders += 1;
+      agg[d].revenue += Number(o.totalAmount || 0);
     }
+
+    const out = Object.values(agg).sort((a, b) => new Date(a.date) - new Date(b.date));
+    res.json(out);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching vendor daily stats", error: err.message });
   }
-);
+});
 
-// simple alias
-router.get(
-  "/vendor/mine",
-  authenticateToken,
-  requireVendor,
-  ensureVendorProfile,
-  async (req, res) => {
-    req.url = "/vendor" + (req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "");
-    router.handle(req, res);
+/**
+ * GET /api/orders/vendor
+ * Paginated vendor orders for top items etc
+ */
+router.get("/vendor", authenticateToken, async (req, res) => {
+  try {
+    const vendorId = req.query.vendorId || req.user?.VendorId;
+    if (!vendorId) return res.status(400).json({ message: "Missing vendorId" });
+
+    const page = parseInt(req.query.page) || 1;
+    const pageSize = parseInt(req.query.pageSize) || 50;
+
+    const { count, rows } = await Order.findAndCountAll({
+      where: { VendorId: vendorId },
+      include: [
+        {
+          model: MenuItem,
+          attributes: ["id", "name", "price"],
+          through: { attributes: ["quantity"] },
+        },
+      ],
+      order: [["createdAt", "DESC"]],
+      offset: (page - 1) * pageSize,
+      limit: pageSize,
+    });
+
+    res.json({ items: rows, total: count, page, pageSize });
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching vendor orders", error: err.message });
   }
-);
-
-/* ----------------- vendor summary (uses all VendorIds) ----------------- */
-router.get(
-  "/vendor/summary",
-  authenticateToken,
-  requireVendor,
-  ensureVendorProfile,
-  async (req, res) => {
-    try {
-      const vendorIds = await buildVendorScope(req);
-
-      const startOfToday = () => { const d = new Date(); d.setHours(0,0,0,0); return d; };
-      const startOfWeek  = () => { const d = new Date(); const diff = (d.getDay()+6)%7; d.setHours(0,0,0,0); d.setDate(d.getDate()-diff); return d; };
-      const startOfMonth = () => { const d = new Date(); d.setHours(0,0,0,0); d.setDate(1); return d; };
-
-      const nonRevenueStatuses = ["rejected", "canceled"];
-      const revenueWhere = { VendorId: { [Op.in]: vendorIds }, status: { [Op.notIn]: nonRevenueStatuses } };
-
-      const [totalOrders, lifetimeRevenue] = await Promise.all([
-        Order.count({ where: { VendorId: { [Op.in]: vendorIds } } }),
-        Order.sum("totalAmount", { where: revenueWhere }),
-      ]);
-
-      const ST = ["pending", "accepted", "ready", "delivered", "rejected", "canceled"];
-      const statusCounts = {};
-      await Promise.all(
-        ST.map(async (s) => {
-          statusCounts[s] = await Order.count({ where: { VendorId: { [Op.in]: vendorIds }, status: s } });
-        })
-      );
-
-      const todayStart = startOfToday();
-      const weekStart  = startOfWeek();
-      const monthStart = startOfMonth();
-
-      const [ordersToday, revenueToday] = await Promise.all([
-        Order.count({ where: { VendorId: { [Op.in]: vendorIds }, createdAt: { [Op.gte]: todayStart } } }),
-        Order.sum("totalAmount", { where: { ...revenueWhere, createdAt: { [Op.gte]: todayStart } } }),
-      ]);
-
-      const [ordersWeek, revenueWeek] = await Promise.all([
-        Order.count({ where: { VendorId: { [Op.in]: vendorIds }, createdAt: { [Op.gte]: weekStart } } }),
-        Order.sum("totalAmount", { where: { ...revenueWhere, createdAt: { [Op.gte]: weekStart } } }),
-      ]);
-
-      const [ordersMonth, revenueMonth] = await Promise.all([
-        Order.count({ where: { VendorId: { [Op.in]: vendorIds }, createdAt: { [Op.gte]: monthStart } } }),
-        Order.sum("totalAmount", { where: { ...revenueWhere, createdAt: { [Op.gte]: monthStart } } }),
-      ]);
-
-      res.json({
-        vendorId: req.vendor.id,
-        totals:   { orders: totalOrders || 0, revenue: Number(lifetimeRevenue || 0) },
-        today:    { orders: ordersToday || 0, revenue: Number(revenueToday || 0) },
-        week:     { orders: ordersWeek || 0, revenue: Number(revenueWeek || 0) },
-        month:    { orders: ordersMonth || 0, revenue: Number(revenueMonth || 0) },
-        byStatus: statusCounts,
-      });
-    } catch (err) {
-      console.error("GET /api/orders/vendor/summary error:", err);
-      res.status(500).json({ message: "Failed to build summary", error: err.message });
-    }
-  }
-);
-
-/* ----------------- vendor daily (uses all VendorIds) ----------------- */
-router.get(
-  "/vendor/daily",
-  authenticateToken,
-  requireVendor,
-  ensureVendorProfile,
-  async (req, res) => {
-    try {
-      const vendorIds = await buildVendorScope(req);
-      const days = Math.max(1, Math.min(90, Number(req.query.days) || 14));
-
-      const start = new Date();
-      start.setHours(0, 0, 0, 0);
-      start.setDate(start.getDate() - (days - 1));
-
-      const rows = await Order.findAll({
-        attributes: [
-          [sequelize.fn("to_char", sequelize.fn("date_trunc", "day", sequelize.col("createdAt")), "YYYY-MM-DD"), "date"],
-          [sequelize.fn("COUNT", sequelize.literal("*")), "cnt"],
-          [sequelize.fn("SUM", sequelize.literal(`CASE WHEN status NOT IN ('rejected','canceled') THEN "totalAmount" ELSE 0 END`)), "rev"],
-        ],
-        where: { VendorId: { [Op.in]: vendorIds }, createdAt: { [Op.gte]: start } },
-        group: [sequelize.fn("to_char", sequelize.fn("date_trunc", "day", sequelize.col("createdAt")), "YYYY-MM-DD")],
-        order: [[sequelize.fn("to_char", sequelize.fn("date_trunc", "day", sequelize.col("createdAt")), "YYYY-MM-DD"), "ASC"]],
-        raw: true,
-      });
-
-      const map = new Map(rows.map(r => [r.date, r]));
-      const out = [];
-      const d = new Date(start);
-      for (let i = 0; i < days; i++) {
-        const key = d.toISOString().slice(0, 10);
-        out.push({
-          date: key,
-          orders: Number(map.get(key)?.cnt || 0),
-          revenue: Number(map.get(key)?.rev || 0),
-        });
-        d.setDate(d.getDate() + 1);
-      }
-
-      res.json(out);
-    } catch (err) {
-      console.error("GET /api/orders/vendor/daily error:", err);
-      res.status(500).json({ message: "Failed to build daily trend", error: err.message });
-    }
-  }
-);
+});
 
 /* ----------------- vendor (any) orders by id (legacy) ----------------- */
 router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
