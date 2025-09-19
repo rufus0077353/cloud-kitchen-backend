@@ -1,15 +1,29 @@
+
+// routes/vendorRoutes.js
 const express = require("express");
 const router = express.Router();
 
-const { Vendor, MenuItem, Order } = require("../models");
 const { Op } = require("sequelize");
-const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
+const {
+  Vendor,
+  MenuItem,
+  Order,
+  OrderItem,   // ✅ needed for force delete
+  Payout,      // ✅ optional; handled defensively
+} = require("../models");
+
+const {
+  authenticateToken,
+  requireVendor,
+  requireAdmin, // ✅ you used this below
+} = require("../middleware/authMiddleware");
+
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 
 /* helper: all vendor ids for this user */
 async function allVendorIdsForUser(userId) {
   const rows = await Vendor.findAll({ where: { UserId: userId }, attributes: ["id"] });
-  return rows.map(r => Number(r.id)).filter(Number.isFinite);
+  return rows.map((r) => Number(r.id)).filter(Number.isFinite);
 }
 
 /* ----------------- WHO AM I ----------------- */
@@ -64,6 +78,7 @@ router.patch(
 router.get("/", async (_req, res) => {
   try {
     const vendors = await Vendor.findAll({
+      where: { isDeleted: { [Op.not]: true } }, // ✅ hide soft-deleted
       attributes: ["id", "name", "location", "cuisine", "isOpen", "phone", "logoUrl"],
       order: [["createdAt", "DESC"]],
     });
@@ -105,8 +120,12 @@ router.get("/:id/menu", async (req, res) => {
       return res.status(400).json({ message: "Invalid vendor id" });
     }
 
-    const vendor = await Vendor.findByPk(idNum, { attributes: ["id", "isOpen"] });
-    if (!vendor) return res.status(404).json({ message: "Vendor not found" });
+    const vendor = await Vendor.findByPk(idNum, {
+      attributes: ["id", "isOpen", "isDeleted"],
+    });
+    if (!vendor || vendor.isDeleted) {
+      return res.status(404).json({ message: "Vendor not found" });
+    }
 
     const items = await MenuItem.findAll({
       where: { VendorId: idNum, isAvailable: true },
@@ -122,7 +141,8 @@ router.get("/:id/menu", async (req, res) => {
 /* ----------------- GET VENDOR BY ID (PUBLIC) ----------------- */
 router.get("/:id", async (req, res) => {
   try {
-    const vendor = await Vendor.findByPk(req.params.id, {
+    const vendor = await Vendor.findOne({
+      where: { id: req.params.id, isDeleted: { [Op.not]: true } }, // ✅ hide soft-deleted
       attributes: ["id", "name", "location", "cuisine", "isOpen", "phone", "logoUrl"],
     });
     if (!vendor) return res.status(404).json({ message: "Vendor not found" });
@@ -159,7 +179,7 @@ router.put("/:id", authenticateToken, async (req, res) => {
   }
 });
 
-// HARD DELETE a vendor and everything related (admin only)
+/* ----------------- HARD DELETE EVERYTHING (ADMIN) ----------------- */
 router.delete("/:id/force", authenticateToken, requireAdmin, async (req, res) => {
   const t = await Vendor.sequelize.transaction();
   try {
@@ -175,15 +195,15 @@ router.delete("/:id/force", authenticateToken, requireAdmin, async (req, res) =>
       return res.status(404).json({ message: "Vendor not found" });
     }
 
-    // 1) find all orders for this vendor
+    // 1) collect order ids for this vendor
     const orders = await Order.findAll({
       where: { VendorId: id },
       attributes: ["id"],
       transaction: t,
     });
-    const orderIds = orders.map(o => o.id);
+    const orderIds = orders.map((o) => o.id);
 
-    // 2) delete order line items
+    // 2) delete line items
     let deletedOrderItems = 0;
     if (orderIds.length) {
       deletedOrderItems = await OrderItem.destroy({
@@ -198,7 +218,7 @@ router.delete("/:id/force", authenticateToken, requireAdmin, async (req, res) =>
       transaction: t,
     });
 
-    // 4) delete payouts if that table exists
+    // 4) delete payouts (if that model/table exists)
     let deletedPayouts = 0;
     if (Payout && typeof Payout.destroy === "function") {
       deletedPayouts = await Payout.destroy({
@@ -213,7 +233,7 @@ router.delete("/:id/force", authenticateToken, requireAdmin, async (req, res) =>
       transaction: t,
     });
 
-    // 6) finally delete the vendor
+    // 6) delete the vendor
     await Vendor.destroy({ where: { id }, transaction: t });
 
     await t.commit();
@@ -227,7 +247,9 @@ router.delete("/:id/force", authenticateToken, requireAdmin, async (req, res) =>
       },
     });
   } catch (e) {
-    try { await t.rollback(); } catch {}
+    try {
+      await t.rollback();
+    } catch {}
     return res.status(500).json({ message: "Force delete failed", error: e.message });
   }
 });
@@ -250,7 +272,7 @@ router.get(
         status: { [Op.notIn]: ["rejected", "canceled"] },
         paymentStatus: "paid",
       };
-      const grossPaid = await Order.sum("totalAmount", { where }) || 0;
+      const grossPaid = (await Order.sum("totalAmount", { where })) || 0;
       const paidOrders = await Order.count({ where });
       const commission = +(grossPaid * Number(process.env.COMMISSION_PCT || 0.15)).toFixed(2);
       const netOwed = +(grossPaid - commission).toFixed(2);
