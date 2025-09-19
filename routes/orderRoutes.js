@@ -97,18 +97,20 @@ async function safeCreateIdempotencyKey(record, t) {
   }
 }
 
-/* ----------------- user orders (optionally paginated) ----------------- */
+
+/* ----------------- user orders (always object shape) ----------------- */
 router.get("/my", authenticateToken, async (req, res) => {
   try {
     const { page, pageSize } = parsePageParams(req.query);
+    const baseInclude = [
+      { model: Vendor, attributes: ["id", "name", "cuisine"] },
+      { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
+    ];
 
     if (page > 0) {
       const { count, rows } = await Order.findAndCountAll({
         where: { UserId: req.user.id },
-        include: [
-          { model: Vendor, attributes: ["id", "name", "cuisine"] },
-          { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
-        ],
+        include: baseInclude,
         order: [["createdAt", "DESC"]],
         limit: pageSize,
         offset: (page - 1) * pageSize,
@@ -122,21 +124,24 @@ router.get("/my", authenticateToken, async (req, res) => {
       });
     }
 
-    const orders = await Order.findAll({
+    const rows = await Order.findAll({
       where: { UserId: req.user.id },
-      include: [
-        { model: Vendor, attributes: ["id", "name", "cuisine"] },
-        { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
-      ],
+      include: baseInclude,
       order: [["createdAt", "DESC"]],
     });
-    res.json(orders);
+    return res.json({
+      items: rows,
+      total: rows.length,
+      page: 1,
+      pageSize: rows.length,
+      totalPages: 1,
+    });
   } catch (err) {
     res.status(500).json({ message: "Error fetching user orders", error: err.message });
   }
 });
 
-/* ----------------- vendor orders — supports historical VendorIds ----------------- */
+/* ----------------- vendor orders (always object shape) ----------------- */
 router.get(
   "/vendor",
   authenticateToken,
@@ -144,29 +149,42 @@ router.get(
   ensureVendorProfile,
   async (req, res) => {
     try {
-      const vendorIds = await buildVendorScope(req);
+      const vendorId = req.vendor.id;
       const { page, pageSize } = parsePageParams(req.query);
-
-      const baseQuery = {
-        where: { VendorId: { [Op.in]: vendorIds } },
-        include: [
-          { model: User, attributes: ["id", "name", "email"] },
-          { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
-        ],
-        order: [["createdAt", "DESC"]],
-      };
+      const baseInclude = [
+        { model: User, attributes: ["id", "name", "email"] },
+        { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
+      ];
 
       if (page > 0) {
         const { count, rows } = await Order.findAndCountAll({
-          ...baseQuery, limit: pageSize, offset: (page - 1) * pageSize,
+          where: { VendorId: vendorId },
+          include: baseInclude,
+          order: [["createdAt", "DESC"]],
+          limit: pageSize,
+          offset: (page - 1) * pageSize,
         });
         return res.json({
-          items: rows, total: count, page, pageSize, totalPages: Math.ceil(count / pageSize),
+          items: rows,
+          total: count,
+          page,
+          pageSize,
+          totalPages: Math.ceil(count / pageSize),
         });
       }
 
-      const orders = await Order.findAll(baseQuery);
-      res.json(orders);
+      const rows = await Order.findAll({
+        where: { VendorId: vendorId },
+        include: baseInclude,
+        order: [["createdAt", "DESC"]],
+      });
+      return res.json({
+        items: rows,
+        total: rows.length,
+        page: 1,
+        pageSize: rows.length,
+        totalPages: 1,
+      });
     } catch (err) {
       res.status(500).json({ message: "Error fetching vendor orders", error: err.message });
     }
