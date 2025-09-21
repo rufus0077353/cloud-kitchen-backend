@@ -12,6 +12,7 @@ const path = require("path");
 
 // ---- DB ----
 const db = require("./models");
+const { DataTypes } = require("sequelize");
 
 // ---- App ----
 const app = express();
@@ -54,8 +55,7 @@ const corsConfig = {
    ========================= */
 app.set("trust proxy", 1);
 
-app.use(cors(corsConfig)); // Handles preflights globally — no explicit app.options('*') needed
-
+app.use(cors(corsConfig));
 app.use(
   helmet({
     contentSecurityPolicy: false,
@@ -108,13 +108,9 @@ const io = new Server(server, {
   allowEIO3: true,
 });
 
-io.use((socket, next) => {
-  // const token = socket.handshake.auth?.token
-  next();
-});
-
 const emitToVendor = (vendorId, event, payload) => vendorId && io.to(`vendor:${vendorId}`).emit(event, payload);
 const emitToUser = (userId, event, payload) => userId && io.to(`user:${userId}`).emit(event, payload);
+
 app.set("io", io);
 app.set("emitToVendor", emitToVendor);
 app.set("emitToUser", emitToUser);
@@ -143,6 +139,7 @@ const orderRoutes = require("./routes/orderRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 const pushRoutes = require("./routes/pushRoutes");
 const uploadRoutes = require("./routes/uploadRoutes");
+const adminCleanupRoutes = require("./routes/adminCleanupRoutes");
 
 let paymentsRouter = null;
 try {
@@ -176,6 +173,7 @@ mountWithEmit("/api/orders", orderRoutes);
 mountSafe("/api/push", pushRoutes);
 mountSafe("/api/admin", adminRoutes);
 mountSafe("/api/uploads", uploadRoutes);
+mountSafe("/api/admin-cleanup", adminCleanupRoutes);
 if (paymentsRouter) mountWithEmit("/api/payments", paymentsRouter);
 
 app.get("/public-key", (_req, res) => res.json({ publicKey: VAPID_PUBLIC_KEY || "" }));
@@ -198,20 +196,53 @@ app.use((err, req, res, _next) => {
 });
 
 /* =========================
-   Start
+   Start + DB Fix
    ========================= */
+async function ensureVendorTimestamps() {
+  const qi = db.sequelize.getQueryInterface();
+  let table;
+  try {
+    table = await qi.describeTable("vendors");
+  } catch {
+    return;
+  }
+
+  if (!table.createdAt) {
+    console.log('[db] Adding "createdAt" to vendors with default NOW()');
+    await qi.addColumn("vendors", "createdAt", {
+      type: DataTypes.DATE,
+      allowNull: false,
+      defaultValue: db.sequelize.literal("CURRENT_TIMESTAMP"),
+    });
+  }
+
+  if (!table.updatedAt) {
+    console.log('[db] Adding "updatedAt" to vendors with default NOW()');
+    await qi.addColumn("vendors", "updatedAt", {
+      type: DataTypes.DATE,
+      allowNull: false,
+      defaultValue: db.sequelize.literal("CURRENT_TIMESTAMP"),
+    });
+  }
+}
+
 const PORT = process.env.PORT || 5000;
 server.keepAliveTimeout = 65000;
 server.headersTimeout = 66000;
 
 db.sequelize
-  .sync({ alter: true })
+  .authenticate()
   .then(async () => {
-    console.log("✅ DB synced successfully");
-    try {
-      const tables = await db.sequelize.getQueryInterface().showAllTables();
-      console.log("🧩 Tables in DB:", tables);
-    } catch {}
+    await ensureVendorTimestamps();
+
+    // sync only in dev
+    if (process.env.NODE_ENV !== "production") {
+      await db.sequelize.sync({ alter: true });
+      console.log("✅ DB synced successfully (dev only)");
+    } else {
+      console.log("⏭️  Skipping sequelize.sync in production");
+    }
+
     server.listen(PORT, () => {
       console.log(`🚀 Server (HTTP + Socket.IO) listening on port ${PORT}`);
       console.log("🌐 Allowed origins:", FRONTENDS_LIST.join(", "), " + *.netlify.app + localhost");
@@ -219,7 +250,7 @@ db.sequelize
     });
   })
   .catch((err) => {
-    console.error("❌ DB sync failed:", err);
+    console.error("❌ DB startup failed:", err);
     process.exit(1);
   });
 
