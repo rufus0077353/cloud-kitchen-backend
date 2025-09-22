@@ -8,7 +8,7 @@ const {
   Vendor,
   MenuItem,
   Order,
-  OrderItem,  // used by /:id/force
+  OrderItem, // used by /:id/force
   Payout,     // optional; handled defensively
 } = require("../models");
 
@@ -34,10 +34,11 @@ router.get(
   ensureVendorProfile,
   async (req, res) => {
     try {
+      // ensureVendorProfile already revived/created vendor; just return it
       const v = await Vendor.findByPk(req.vendor.id, {
         attributes: ["id", "UserId", "isOpen", "name", "location", "cuisine", "phone", "logoUrl", "isDeleted"],
       });
-      if (!v || v.isDeleted) return res.status(404).json({ message: "Vendor profile not found" });
+      if (!v) return res.status(404).json({ message: "Vendor profile not found" });
       res.json({ vendorId: v.id, userId: req.user.id, ...v.toJSON() });
     } catch (e) {
       res.status(500).json({ message: "Failed to load vendor profile", error: e.message });
@@ -59,7 +60,7 @@ router.patch(
       }
 
       const vendor = await Vendor.findByPk(req.vendor.id);
-      if (!vendor || vendor.isDeleted) return res.status(404).json({ message: "Vendor not found" });
+      if (!vendor) return res.status(404).json({ message: "Vendor not found" });
 
       vendor.isOpen = isOpen;
       await vendor.save();
@@ -93,41 +94,29 @@ router.post("/", authenticateToken, async (req, res) => {
   try {
     const { name, location, cuisine, UserId, phone, logoUrl } = req.body;
 
-    // minimal requirements on first creation
     if (!name || !location || !cuisine) {
       return res.status(400).json({ message: "Name, location, and cuisine are required" });
     }
 
-    // always tie to logged-in user
     const userId = UserId || req.user.id;
-
-    // try to find existing (even if soft-deleted)
     let vendor = await Vendor.findOne({ where: { UserId: userId } });
 
-    // if none, create
     if (!vendor) {
-      const [createdVendor, created] = await Vendor.findOrCreate({
-        where: { UserId: userId },
-        defaults: {
-          name,
-          location,
-          cuisine,
-          isOpen: true,
-          phone: phone || null,
-          logoUrl: logoUrl || null,
-          isDeleted: false,
-        },
+      vendor = await Vendor.create({
+        name,
+        location,
+        cuisine,
+        isOpen: true,
+        phone: phone || null,
+        logoUrl: logoUrl || null,
+        isDeleted: false,
+        UserId: userId,
       });
-      vendor = createdVendor;
       return res.status(201).json({ message: "Vendor created", vendor, created: true });
     }
 
-    // if it existed but was soft-deleted, undelete + refresh core fields
-    if (vendor.isDeleted) {
-      vendor.isDeleted = false;
-    }
+    if (vendor.isDeleted) vendor.isDeleted = false;
 
-    // update basic fields when reusing
     vendor.name     = name     ?? vendor.name;
     vendor.location = location ?? vendor.location;
     vendor.cuisine  = cuisine  ?? vendor.cuisine;
@@ -241,7 +230,6 @@ router.delete("/:id/force", authenticateToken, requireAdmin, async (req, res) =>
       return res.status(404).json({ message: "Vendor not found" });
     }
 
-    // 1) collect order ids for this vendor
     const orders = await Order.findAll({
       where: { VendorId: id },
       attributes: ["id"],
@@ -249,7 +237,6 @@ router.delete("/:id/force", authenticateToken, requireAdmin, async (req, res) =>
     });
     const orderIds = orders.map((o) => o.id);
 
-    // 2) delete order line items
     let deletedOrderItems = 0;
     if (orderIds.length) {
       deletedOrderItems = await OrderItem.destroy({
@@ -258,13 +245,11 @@ router.delete("/:id/force", authenticateToken, requireAdmin, async (req, res) =>
       });
     }
 
-    // 3) delete orders
     const deletedOrders = await Order.destroy({
       where: { VendorId: id },
       transaction: t,
     });
 
-    // 4) delete payouts (if table exists)
     let deletedPayouts = 0;
     if (Payout && typeof Payout.destroy === "function") {
       deletedPayouts = await Payout.destroy({
@@ -273,13 +258,11 @@ router.delete("/:id/force", authenticateToken, requireAdmin, async (req, res) =>
       });
     }
 
-    // 5) delete menu items
     const deletedMenuItems = await MenuItem.destroy({
       where: { VendorId: id },
       transaction: t,
     });
 
-    // 6) finally delete the vendor
     await Vendor.destroy({ where: { id }, transaction: t });
 
     await t.commit();
@@ -298,7 +281,7 @@ router.delete("/:id/force", authenticateToken, requireAdmin, async (req, res) =>
   }
 });
 
-/* --------- COMPAT: payouts under /vendors/:id/payouts (old UI calls) --------- */
+/* --------- COMPAT: payouts under /vendors/:id/payouts --------- */
 router.get(
   "/:id/payouts",
   authenticateToken,
