@@ -1,4 +1,3 @@
-
 // routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
@@ -166,106 +165,124 @@ router.get("/my", authenticateToken, async (req, res) => {
 });
 
 /* ===================== VENDOR SUMMARY ===================== */
-router.get("/vendor/summary", authenticateToken, async (req, res) => {
-  try {
-    const vendorId = await resolveVendorId(req);
-    if (!vendorId) return res.status(400).json({ message: "Missing vendorId" });
+router.get(
+  "/vendor/summary",
+  authenticateToken,
+  requireVendor,
+  ensureVendorProfile,
+  async (req, res) => {
+    try {
+      const vendorId = req.vendor?.id || (await resolveVendorId(req));
+      if (!vendorId) return res.status(400).json({ message: "Missing vendorId" });
 
-    const today = new Date(); today.setHours(0, 0, 0, 0);
-    const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
-    const monthAgo = new Date(); monthAgo.setDate(1);
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
+      const monthAgo = new Date(); monthAgo.setDate(1);
 
-    const [todayOrders, weekOrders, monthOrders, totalOrders] = await Promise.all([
-      Order.findAll({ where: { VendorId: vendorId, createdAt: { [Op.gte]: today } } }),
-      Order.findAll({ where: { VendorId: vendorId, createdAt: { [Op.gte]: weekAgo } } }),
-      Order.findAll({ where: { VendorId: vendorId, createdAt: { [Op.gte]: monthAgo } } }),
-      Order.findAll({ where: { VendorId: vendorId } }),
-    ]);
+      const [todayOrders, weekOrders, monthOrders, totalOrders] = await Promise.all([
+        Order.findAll({ where: { VendorId: vendorId, createdAt: { [Op.gte]: today } } }),
+        Order.findAll({ where: { VendorId: vendorId, createdAt: { [Op.gte]: weekAgo } } }),
+        Order.findAll({ where: { VendorId: vendorId, createdAt: { [Op.gte]: monthAgo } } }),
+        Order.findAll({ where: { VendorId: vendorId } }),
+      ]);
 
-    const sum = (arr) => arr.reduce((s, o) => s + Number(o.totalAmount || 0), 0);
+      const sum = (arr) => arr.reduce((s, o) => s + Number(o.totalAmount || 0), 0);
 
-    res.json({
-      vendorIdUsed: vendorId, // debug
-      today:  { orders: todayOrders.length,  revenue: sum(todayOrders)  },
-      week:   { orders: weekOrders.length,   revenue: sum(weekOrders)   },
-      month:  { orders: monthOrders.length,  revenue: sum(monthOrders)  },
-      totals: { orders: totalOrders.length,  revenue: sum(totalOrders)  },
-      byStatus: totalOrders.reduce((map, o) => {
-        const st = (o.status || "pending").toLowerCase();
-        map[st] = (map[st] || 0) + 1;
-        return map;
-      }, {}),
-    });
-  } catch (err) {
-    res.status(500).json({ message: "Error fetching vendor summary", error: err.message });
+      res.json({
+        vendorIdUsed: vendorId,
+        today:  { orders: todayOrders.length,  revenue: sum(todayOrders)  },
+        week:   { orders: weekOrders.length,   revenue: sum(weekOrders)   },
+        month:  { orders: monthOrders.length,  revenue: sum(monthOrders)  },
+        totals: { orders: totalOrders.length,  revenue: sum(totalOrders)  },
+        byStatus: totalOrders.reduce((map, o) => {
+          const st = (o.status || "pending").toLowerCase();
+          map[st] = (map[st] || 0) + 1;
+          return map;
+        }, {}),
+      });
+    } catch (err) {
+      res.status(500).json({ message: "Error fetching vendor summary", error: err.message });
+    }
   }
-});
+);
 
 /* ===================== VENDOR DAILY ===================== */
-router.get("/vendor/daily", authenticateToken, async (req, res) => {
-  try {
-    const vendorId = await resolveVendorId(req);
-    if (!vendorId) return res.status(400).json({ message: "Missing vendorId" });
+router.get(
+  "/vendor/daily",
+  authenticateToken,
+  requireVendor,
+  ensureVendorProfile,
+  async (req, res) => {
+    try {
+      const vendorId = req.vendor?.id || (await resolveVendorId(req));
+      if (!vendorId) return res.status(400).json({ message: "Missing vendorId" });
 
-    const days = parseInt(req.query.days, 10) || 14;
-    const since = new Date(); since.setDate(since.getDate() - days);
+      const days = parseInt(req.query.days, 10) || 14;
+      const since = new Date(); since.setDate(since.getDate() - days);
 
-    const orders = await Order.findAll({
-      where: { VendorId: vendorId, createdAt: { [Op.gte]: since } },
-      attributes: ["id", "totalAmount", "createdAt"],
-    });
+      const orders = await Order.findAll({
+        where: { VendorId: vendorId, createdAt: { [Op.gte]: since } },
+        attributes: ["id", "totalAmount", "createdAt"],
+      });
 
-    const agg = {};
-    for (const o of orders) {
-      const d = o.createdAt.toISOString().slice(0, 10); // YYYY-MM-DD
-      if (!agg[d]) agg[d] = { date: d, orders: 0, revenue: 0 };
-      agg[d].orders += 1;
-      agg[d].revenue += Number(o.totalAmount || 0);
+      const agg = {};
+      for (const o of orders) {
+        const d = o.createdAt.toISOString().slice(0, 10);
+        if (!agg[d]) agg[d] = { date: d, orders: 0, revenue: 0 };
+        agg[d].orders += 1;
+        agg[d].revenue += Number(o.totalAmount || 0);
+      }
+
+      res.json({
+        vendorIdUsed: vendorId,
+        items: Object.values(agg).sort((a, b) => new Date(a.date) - new Date(b.date)),
+      });
+    } catch (err) {
+      res.status(500).json({ message: "Error fetching vendor daily stats", error: err.message });
     }
-
-    res.json({
-      vendorIdUsed: vendorId,
-      items: Object.values(agg).sort((a, b) => new Date(a.date) - new Date(b.date)),
-    });
-  } catch (err) {
-    res.status(500).json({ message: "Error fetching vendor daily stats", error: err.message });
   }
-});
+);
 
 /* ===================== VENDOR ORDERS (paginated) ===================== */
-router.get("/vendor", authenticateToken, async (req, res) => {
-  try {
-    const vendorId = await resolveVendorId(req);
-    if (!vendorId) return res.status(400).json({ message: "Missing vendorId" });
+router.get(
+  "/vendor",
+  authenticateToken,
+  requireVendor,
+  ensureVendorProfile,
+  async (req, res) => {
+    try {
+      const vendorId = req.vendor?.id || (await resolveVendorId(req));
+      if (!vendorId) return res.status(400).json({ message: "Missing vendorId" });
 
-    const { page, pageSize } = parsePageParams(req.query);
+      const { page, pageSize } = parsePageParams(req.query);
 
-    const { count, rows } = await Order.findAndCountAll({
-      where: { VendorId: vendorId },
-      include: [
-        {
-          model: MenuItem,
-          attributes: ["id", "name", "price"],
-          through: { attributes: ["quantity"] },
-        },
-      ],
-      order: [["createdAt", "DESC"]],
-      offset: (page - 1) * pageSize,
-      limit: pageSize,
-    });
+      const { count, rows } = await Order.findAndCountAll({
+        where: { VendorId: vendorId },
+        include: [
+          {
+            model: MenuItem,
+            attributes: ["id", "name", "price"],
+            through: { attributes: ["quantity"] },
+          },
+        ],
+        order: [["createdAt", "DESC"]],
+        offset: (page - 1) * pageSize,
+        limit: pageSize,
+      });
 
-    res.json({
-      vendorIdUsed: vendorId,
-      items: rows,
-      total: count,
-      page,
-      pageSize,
-      totalPages: Math.ceil(count / pageSize)
-    });
-  } catch (err) {
-    res.status(500).json({ message: "Error fetching vendor orders", error: err.message });
+      res.json({
+        vendorIdUsed: vendorId,
+        items: rows,
+        total: count,
+        page,
+        pageSize,
+        totalPages: Math.ceil(count / pageSize)
+      });
+    } catch (err) {
+      res.status(500).json({ message: "Error fetching vendor orders", error: err.message });
+    }
   }
-});
+);
 
 /* ===================== VENDOR ORDERS (legacy by param) ===================== */
 router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
