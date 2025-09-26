@@ -1,4 +1,3 @@
-// models/MenuItem.js
 module.exports = (sequelize, DataTypes) => {
   const MenuItem = sequelize.define(
     "MenuItem",
@@ -7,16 +6,15 @@ module.exports = (sequelize, DataTypes) => {
       price:       { type: DataTypes.FLOAT,  allowNull: false },
       description: { type: DataTypes.STRING, allowNull: true },
       isAvailable: { type: DataTypes.BOOLEAN, defaultValue: true },
-      VendorId:    { type: DataTypes.INTEGER, allowNull: false },
-
-      // 👇 canonical key expected by your routes & frontend
-      imageUrl:    { type: DataTypes.STRING(1024), allowNull: true, validate: { isUrl: true } },
+      imageUrl:    { type: DataTypes.STRING(1024), allowNull: true }, // accept /uploads and http(s)
     },
-    {
-      tableName: "menu_items",
-      timestamps: true,
-    }
+    { tableName: "MenuItems", timestamps: true }
   );
+
+  MenuItem.associate = (models) => {
+    MenuItem.belongsTo(models.Vendor, { foreignKey: "VendorId", onDelete: "CASCADE" });
+    MenuItem.hasMany(models.OrderItem, { foreignKey: "MenuItemId" });
+  };
 
   return MenuItem;
 };
