@@ -1,4 +1,3 @@
-
 const bcrypt = require("bcrypt");
 
 module.exports = (sequelize, DataTypes) => {
@@ -11,12 +10,18 @@ module.exports = (sequelize, DataTypes) => {
       role:      { type: DataTypes.ENUM("user", "vendor", "admin"), defaultValue: "user" },
       isDeleted: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     },
-    { tableName: "Users", timestamps: true }
+    {
+      tableName: "users",  // ⚠️ lowercase plural is standard
+      timestamps: true,
+    }
   );
 
-  User.beforeCreate(async (user) => {
-    const salt = await bcrypt.genSalt(10);
-    user.password = await bcrypt.hash(user.password, salt);
+  // Hash password on create AND update
+  User.beforeSave(async (user) => {
+    if (user.changed("password")) {
+      const salt = await bcrypt.genSalt(10);
+      user.password = await bcrypt.hash(user.password, salt);
+    }
   });
 
   User.prototype.validPassword = async function (inputPassword) {
@@ -25,7 +30,7 @@ module.exports = (sequelize, DataTypes) => {
 
   User.associate = (models) => {
     User.hasOne(models.Vendor, { foreignKey: "UserId" });
-    User.hasMany(models.Order,  { foreignKey: "UserId" });
+    User.hasMany(models.Order, { foreignKey: "UserId" });
   };
 
   return User;
