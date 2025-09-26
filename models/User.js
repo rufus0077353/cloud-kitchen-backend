@@ -11,7 +11,7 @@ module.exports = (sequelize, DataTypes) => {
       isDeleted: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     },
     {
-      tableName: "users",  // ⚠️ lowercase plural is standard
+      tableName: "Users",  // ⚠️ lowercase plural is standard
       timestamps: true,
     }
   );
