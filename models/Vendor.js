@@ -1,5 +1,3 @@
-
-// models/Vendor.js
 module.exports = (sequelize, DataTypes) => {
   const Vendor = sequelize.define(
     "Vendor",
@@ -8,15 +6,16 @@ module.exports = (sequelize, DataTypes) => {
       location:  { type: DataTypes.STRING, allowNull: false },
       cuisine:   { type: DataTypes.STRING, allowNull: false },
       phone:     { type: DataTypes.STRING, allowNull: true },
-      logoUrl:   { type: DataTypes.STRING, allowNull: true },
-      isOpen:    { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
 
-      // 🔑 used by your routes; MUST exist in the DB
+      // REMOVE logoUrl unless you create the column
+      // logoUrl:   { type: DataTypes.STRING, allowNull: true },
+
+      isOpen:    { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
       isDeleted: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     },
     {
       tableName: "vendors",
-      timestamps: true, // createdAt/updatedAt are required by your code too
+      timestamps: true, // ✅ camelCase
     }
   );
 
