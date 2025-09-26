@@ -2,17 +2,17 @@
 const bcrypt = require("bcrypt");
 
 module.exports = (sequelize, DataTypes) => {
-  const User = sequelize.define("User", {
-    name:     { type: DataTypes.STRING, allowNull: false },
-    email:    { type: DataTypes.STRING, unique: true, allowNull: false },
-    password: { type: DataTypes.STRING, allowNull: false },
-    role:     { type: DataTypes.STRING, defaultValue: "user" },
-    isDeleted : { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
-  }, {
-    tableName: "users",
-    timestamps: true,
-    freezeTableName: true,
-  });
+  const User = sequelize.define(
+    "User",
+    {
+      name:      { type: DataTypes.STRING, allowNull: false },
+      email:     { type: DataTypes.STRING, allowNull: false, unique: true },
+      password:  { type: DataTypes.STRING, allowNull: false },
+      role:      { type: DataTypes.ENUM("user", "vendor", "admin"), defaultValue: "user" },
+      isDeleted: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    },
+    { tableName: "Users", timestamps: true }
+  );
 
   User.beforeCreate(async (user) => {
     const salt = await bcrypt.genSalt(10);
@@ -20,7 +20,12 @@ module.exports = (sequelize, DataTypes) => {
   });
 
   User.prototype.validPassword = async function (inputPassword) {
-    return await bcrypt.compare(inputPassword, this.password);
+    return bcrypt.compare(inputPassword, this.password);
+  };
+
+  User.associate = (models) => {
+    User.hasOne(models.Vendor, { foreignKey: "UserId" });
+    User.hasMany(models.Order,  { foreignKey: "UserId" });
   };
 
   return User;
