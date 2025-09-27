@@ -1,25 +1,40 @@
-// routes/debugRoutes.js
+
 const express = require("express");
-const router = express.Router();
+const bcrypt = require("bcrypt");
 const { User } = require("../models");
 
-router.get("/debug-user", async (req, res) => {
+const router = express.Router();
+
+router.get("/check-user", async (req, res) => {
   try {
-    const email = req.query.email?.trim().toLowerCase();
-    if (!email) return res.status(400).json({ message: "Email required" });
+    const { email, password } = req.query;
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
 
     const user = await User.findOne({ where: { email } });
-    if (!user) return res.json({ found: false });
+    if (!user) {
+      return res.json({ found: false, message: "User not found" });
+    }
 
-    res.json({
+    let passwordMatch = null;
+    if (password) {
+      passwordMatch = await bcrypt.compare(password, user.password);
+    }
+
+    return res.json({
       found: true,
       id: user.id,
       email: user.email,
       role: user.role,
-      passwordHead: user.password.slice(0, 10), // just to check hash
+      passwordStored: user.password.startsWith("$2b$")
+        ? "hashed ✅"
+        : "not hashed ❌",
+      passwordMatch: password !== undefined ? passwordMatch : "not tested",
     });
   } catch (err) {
-    res.status(500).json({ message: "Error", error: err.message });
+    console.error("debug error:", err);
+    res.status(500).json({ message: "Debug failed", error: err.message });
   }
 });
 
