@@ -188,19 +188,19 @@ app.get("/", (_req, res) => res.send("✅ Cloud Kitchen Backend is live!"));
 
 // ===== TEMP DEBUG ENDPOINTS (remove after fixing login) =====
 
-// list all tables
-app.get("/api/debug/tables", async (req, res) => {
+// GET /api/debug/list-users
+app.get("/api/debug/list-users", async (_req, res) => {
   try {
-    const [results] = await db.sequelize.query(`
-      SELECT table_name
-      FROM information_schema.tables
-      WHERE table_schema = 'public'
-      ORDER BY table_name;
-    `);
-    res.json({tables: results.map(r => r.table_name)});
+    const rows = await db.User.findAll({
+      limit: 20,
+      order: [["id", "ASC"]],
+      attributes: ["id", "name", "email", "role", "createdAt"]
+    });
+    res.json({ count: rows.length, items: rows });
   } catch (err) {
-    res.status(500).json({ message: "Failed", error: err.message });
-  } 
+    console.error("debug list-users error:", err);
+    res.status(500).json({ message: "List failed", error: err.message });
+  }
 });
 
 // GET /api/debug/list-users   (shows a few users quickly)
