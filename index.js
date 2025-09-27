@@ -140,6 +140,7 @@ const adminRoutes = require("./routes/adminRoutes");
 const pushRoutes = require("./routes/pushRoutes");
 const uploadRoutes = require("./routes/uploadRoutes");
 const adminCleanupRoutes = require("./routes/adminCleanupRoutes");
+const debugRoutes = require("./routes/debugRoutes");
 
 let paymentsRouter = null;
 try {
@@ -185,6 +186,7 @@ app.get("/", (_req, res) => res.send("✅ Cloud Kitchen Backend is live!"));
 
 // 404 fallback
 app.use((req, res) => res.status(404).json({ message: "Route not found" }));
+app.use("/api/debug", debugRoutes);
 
 // Global error handler
 app.use((err, req, res, _next) => {
