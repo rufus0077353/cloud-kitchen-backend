@@ -141,6 +141,7 @@ const pushRoutes = require("./routes/pushRoutes");
 const uploadRoutes = require("./routes/uploadRoutes");
 const adminCleanupRoutes = require("./routes/adminCleanupRoutes");
 const debugRoutes = require("./routes/debugRoutes");
+const { table } = require("console");
 
 let paymentsRouter = null;
 try {
@@ -186,6 +187,21 @@ app.get("/", (_req, res) => res.send("✅ Cloud Kitchen Backend is live!"));
 
 
 // ===== TEMP DEBUG ENDPOINTS (remove after fixing login) =====
+
+// list all tables
+app.get("/api/debug/tables", async (req, res) => {
+  try {
+    const [results] = await db.sequelize.query(`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+      ORDER BY table_name;
+    `);
+    res.json({tables: results.map(r => r.table_name)});
+  } catch (err) {
+    res.status(500).json({ message: "Failed", error: err.message });
+  } 
+});
 // GET /api/debug/check-user?email=...&password=optionals
 app.get("/api/debug/check-user", async (req, res) => {
   try {
