@@ -186,7 +186,7 @@ app.get("/", (_req, res) => res.send("✅ Cloud Kitchen Backend is live!"));
 
 
 // ===== TEMP DEBUG ENDPOINTS (remove after fixing login) =====
-// GET /api/debug/check-user?email=...&password=optional
+// GET /api/debug/check-user?email=...&password=optionals
 app.get("/api/debug/check-user", async (req, res) => {
   try {
     const { email, password } = req.query;
