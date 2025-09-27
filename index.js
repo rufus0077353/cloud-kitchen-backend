@@ -211,6 +211,8 @@ app.get("/api/debug/list-users", async (_req, res) => {
   } catch (err) {
     res.status(500).json({ message: "List failed", error: err.message });
   } 
+});
+
 // GET /api/debug/check-user?email=...&password=optionals
 app.get("/api/debug/check-user", async (req, res) => {
   try {
