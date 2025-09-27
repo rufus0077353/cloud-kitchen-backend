@@ -1,40 +1,44 @@
 
 const express = require("express");
-const bcrypt = require("bcrypt");
-const { User } = require("../models");
-
 const router = express.Router();
+const db = require("../models");
 
-router.get("/check-user", async (req, res) => {
+// ✅ List all tables
+router.get("/tables", async (req, res) => {
   try {
-    const { email, password } = req.query;
-    if (!email) {
-      return res.status(400).json({ message: "Email is required" });
-    }
-
-    const user = await User.findOne({ where: { email } });
-    if (!user) {
-      return res.json({ found: false, message: "User not found" });
-    }
-
-    let passwordMatch = null;
-    if (password) {
-      passwordMatch = await bcrypt.compare(password, user.password);
-    }
-
-    return res.json({
-      found: true,
-      id: user.id,
-      email: user.email,
-      role: user.role,
-      passwordStored: user.password.startsWith("$2b$")
-        ? "hashed ✅"
-        : "not hashed ❌",
-      passwordMatch: password !== undefined ? passwordMatch : "not tested",
-    });
+    const [results] = await db.sequelize.query(`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+      ORDER BY table_name;
+    `);
+    res.json(results);
   } catch (err) {
-    console.error("debug error:", err);
-    res.status(500).json({ message: "Debug failed", error: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ✅ Show row counts in each table
+router.get("/table-counts", async (req, res) => {
+  try {
+    const [results] = await db.sequelize.query(`
+      SELECT relname AS table, n_live_tup AS approx_rows
+      FROM pg_stat_user_tables
+      ORDER BY relname;
+    `);
+    res.json(results);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ✅ Peek at first rows of Users (optional)
+router.get("/users-preview", async (req, res) => {
+  try {
+    const [rows] = await db.sequelize.query(`SELECT * FROM "Users" LIMIT 5;`);
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
