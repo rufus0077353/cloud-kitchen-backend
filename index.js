@@ -186,9 +186,6 @@ app.get("/", (_req, res) => res.send("✅ Cloud Kitchen Backend is live!"));
 
 
 // ===== TEMP DEBUG ENDPOINTS (remove after fixing login) =====
-const bcrypt = require("bcrypt");                 // at top already? keep one import
-const db = require("./models");                   // you already have this earlier too
-
 // GET /api/debug/check-user?email=...&password=optional
 app.get("/api/debug/check-user", async (req, res) => {
   try {
