@@ -202,6 +202,15 @@ app.get("/api/debug/tables", async (req, res) => {
     res.status(500).json({ message: "Failed", error: err.message });
   } 
 });
+
+// GET /api/debug/list-users   (shows a few users quickly)
+app.get("/api/debug/list-users", async (_req, res) => {
+  try {
+    const rows = await db.User.findAll({ limit: 10, order: [["id", "ASC"]], attributes: ["id", "name", "email", "role", "createdAt"] });
+    res.json({ count: users.length, users });
+  } catch (err) {
+    res.status(500).json({ message: "List failed", error: err.message });
+  } 
 // GET /api/debug/check-user?email=...&password=optionals
 app.get("/api/debug/check-user", async (req, res) => {
   try {
