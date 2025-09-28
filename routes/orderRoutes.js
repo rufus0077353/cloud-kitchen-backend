@@ -1,7 +1,9 @@
 // routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
-const { Op } = require("sequelize");
+
+// NOTE: You use fn/col/literal in /vendor/daily – import them here.
+const { Op, fn, col, literal } = require("sequelize");
 
 const {
   IdempotencyKey,
@@ -62,32 +64,18 @@ function parsePageParams(q) {
   return { page, pageSize };
 }
 
-// collect ALL VendorIds for this user (covers historical vendor rows)
 async function buildVendorScope(req) {
-  const vendors = await Vendor.findAll({
-    where: { UserId: req.user.id },
-    attributes: ["id"],
-  });
+  const vendors = await Vendor.findAll({ where: { UserId: req.user.id }, attributes: ["id"] });
   const ids = vendors.map(v => Number(v.id)).filter(Number.isFinite);
   if (req.vendor?.id && !ids.includes(Number(req.vendor.id))) ids.push(Number(req.vendor.id));
   return ids.length ? ids : [-1];
 }
 
-// Robust vendorId resolver: query -> token/middleware -> DB lookup
 async function resolveVendorId(req) {
-  // 1) explicit query param
-  if (req.query?.vendorId && Number.isFinite(Number(req.query.vendorId))) {
-    return Number(req.query.vendorId);
-  }
-  // 2) token/middleware common shapes
-  const candidates = [
-    req.user?.VendorId,
-    req.user?.vendorId,
-    req.user?.vendor?.id,
-    req.vendor?.id,
-  ].map(n => Number(n)).filter(n => Number.isFinite(n));
+  if (req.query?.vendorId && Number.isFinite(Number(req.query.vendorId))) return Number(req.query.vendorId);
+  const candidates = [req.user?.VendorId, req.user?.vendorId, req.user?.vendor?.id, req.vendor?.id]
+    .map(Number).filter(Number.isFinite);
   if (candidates.length) return candidates[0];
-  // 3) DB fallback by UserId
   try {
     if (req.user?.id) {
       const v = await Vendor.findOne({ where: { UserId: req.user.id }, attributes: ["id"] });
@@ -97,7 +85,7 @@ async function resolveVendorId(req) {
   return null;
 }
 
-// ---- idempotency helpers (safe if table/model missing) ----
+/* ---- idempotency helpers ---- */
 const isMissingTableError = (err) =>
   !!(err?.original?.code === "42P01" || /no such table|does not exist/i.test(err?.message || ""));
 
@@ -164,10 +152,7 @@ router.get("/my", authenticateToken, async (req, res) => {
   }
 });
 
-/* =========================
-   VENDOR ORDERS (paginated)
-   GET /api/orders/vendor?page=1&pageSize=200
-   ========================= */
+/* ===================== VENDOR ORDERS (paginated) ===================== */
 router.get(
   "/vendor",
   authenticateToken,
@@ -199,10 +184,7 @@ router.get(
   }
 );
 
-/* =========================
-   SUMMARY (today/week/month)
-   GET /api/orders/vendor/summary
-   ========================= */
+/* ===================== SUMMARY (today/week/month) ===================== */
 router.get(
   "/vendor/summary",
   authenticateToken,
@@ -212,10 +194,9 @@ router.get(
     try {
       const VendorId = req.vendor.id;
 
-      // Helpers for date ranges (Postgres)
       const now = new Date();
       const startOfDay   = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      const startOfWeek  = new Date(startOfDay); startOfWeek.setDate(startOfDay.getDate() - startOfDay.getDay()); // Sunday start
+      const startOfWeek  = new Date(startOfDay); startOfWeek.setDate(startOfDay.getDate() - startOfDay.getDay());
       const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
       async function sumCount(whereExtra = {}) {
@@ -225,18 +206,15 @@ router.get(
         return { revenue: +Number(revenue).toFixed(2), orders };
       }
 
-      // by status counts (for chips)
       const byStatus = {};
       const statuses = ["pending", "accepted", "ready", "delivered", "rejected"];
       await Promise.all(
-        statuses.map(async (s) => {
-          byStatus[s] = await Order.count({ where: { VendorId, status: s } });
-        })
+        statuses.map(async (s) => { byStatus[s] = await Order.count({ where: { VendorId, status: s } }); })
       );
 
-      const today = await sumCount({ createdAt: { [Op.gte]: startOfDay } });
-      const week  = await sumCount({ createdAt: { [Op.gte]: startOfWeek } });
-      const month = await sumCount({ createdAt: { [Op.gte]: startOfMonth } });
+      const today  = await sumCount({ createdAt: { [Op.gte]: startOfDay } });
+      const week   = await sumCount({ createdAt: { [Op.gte]: startOfWeek } });
+      const month  = await sumCount({ createdAt: { [Op.gte]: startOfMonth } });
       const totals = await sumCount();
 
       res.json({ today, week, month, totals, byStatus });
@@ -247,11 +225,7 @@ router.get(
   }
 );
 
-/* =========================
-   DAILY TREND
-   GET /api/orders/vendor/daily?days=14
-   Returns: [{ date: 'YYYY-MM-DD', orders, revenue }]
-   ========================= */
+/* ===================== DAILY TREND ===================== */
 router.get(
   "/vendor/daily",
   authenticateToken,
@@ -262,7 +236,6 @@ router.get(
       const VendorId = req.vendor.id;
       const days = Math.max(parseInt(req.query.days || "14", 10), 1);
 
-      // Postgres daily group using date_trunc
       const rows = await Order.findAll({
         where: {
           VendorId,
@@ -278,7 +251,6 @@ router.get(
         raw: true,
       });
 
-      // Normalize to continuous range
       const map = new Map(
         rows.map((r) => [
           new Date(r.bucket).toISOString().slice(0, 10),
