@@ -28,7 +28,7 @@ router.post("/register", async (req, res) => {
       name,
       email,
       password,  // Will be hashed by beforeSave
-      role: role || "user",
+      role: role || "User",
     });
 
     const token = jwt.sign({ userId: newUser.id, role: newUser.role }, JWT_SECRET, { expiresIn: "7d" });

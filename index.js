@@ -186,9 +186,8 @@ app.get("/healthz", (_req, res) => res.status(200).send("ok"));
 app.get("/", (_req, res) => res.send("✅ Cloud Kitchen Backend is live!"));
 
 
-// ===== TEMP DEBUG ENDPOINTS (remove after fixing login) =====
 
-// GET /api/debug/list-users
+// ===== TEMP DEBUG ENDPOINTS =====
 app.get("/api/debug/list-users", async (_req, res) => {
   try {
     const rows = await db.User.findAll({
@@ -203,80 +202,45 @@ app.get("/api/debug/list-users", async (_req, res) => {
   }
 });
 
-// GET /api/debug/list-users   (shows a few users quickly)
-app.get("/api/debug/list-users", async (_req, res) => {
-  try {
-    const rows = await db.User.findAll({ limit: 10, order: [["id", "ASC"]], attributes: ["id", "name", "email", "role", "createdAt"] });
-    res.json({ count: users.length, users });
-  } catch (err) {
-    res.status(500).json({ message: "List failed", error: err.message });
-  } 
-});
-
-// GET /api/debug/check-user?email=...&password=optionals
 app.get("/api/debug/check-user", async (req, res) => {
   try {
     const { email, password } = req.query;
-    if (!email) return res.status(400).json({ message: "Email is required" });
+    if (!email) return res.status(400).json({ message: "Email required" });
 
-    // Uses your Sequelize model (tableName: "Users")
     const user = await db.User.findOne({ where: { email } });
+    if (!user) return res.json({ found: false, message: "User not found" });
 
-    if (!user) {
-      return res.json({ found: false, message: "User not found" });
-    }
-
-    let passwordMatch = null;
-    if (typeof password === "string") {
-      passwordMatch = await bcrypt.compare(password, user.password);
-    }
+    let passwordMatch = undefined;
+    if (password) passwordMatch = await bcrypt.compare(password, user.password);
 
     res.json({
       found: true,
       id: user.id,
       email: user.email,
       role: user.role,
-      // quick sanity on the stored password format
       passwordStored: user.password.startsWith("$2") ? "hashed ✅" : "plain ❌",
-      // only shown if you passed ?password=
-      passwordMatch: typeof password === "string" ? passwordMatch : "not tested",
+      passwordMatch: password ? passwordMatch : "not tested",
     });
   } catch (err) {
-    console.error("debug check-user error:", err);
     res.status(500).json({ message: "Debug failed", error: err.message });
   }
 });
 
-// POST /api/debug/seed-user   (body: {name,email,password,role})
 app.post("/api/debug/seed-user", express.json(), async (req, res) => {
   try {
-    const { name = "Test User", email, password = "Password123", role = "user" } = req.body || {};
+    const { name = "Test", email, password = "Password123", role = "user" } = req.body;
     if (!email) return res.status(400).json({ message: "email required" });
 
     let user = await db.User.findOne({ where: { email } });
-    if (user) {
-      return res.json({ created: false, message: "User already exists", id: user.id, email: user.email });
-    }
+    if (user) return res.json({ created: false, message: "Exists", id: user.id });
 
-    // Your model hashes on save (beforeSave), so create directly:
     user = await db.User.create({ name, email, password, role });
-    return res.status(201).json({ created: true, id: user.id, email: user.email, role: user.role });
+    res.status(201).json({ created: true, id: user.id, email: user.email, role: user.role });
   } catch (err) {
-    console.error("debug seed-user error:", err);
     res.status(500).json({ message: "Seed failed", error: err.message });
   }
 });
-
-// GET /api/debug/list-users   (shows a few users quickly)
-app.get("/api/debug/list-users", async (_req, res) => {
-  try {
-    const rows = await db.User.findAll({ limit: 10, order: [["id", "ASC"]], attributes: ["id", "name", "email", "role", "createdAt"] });
-    res.json({ count: rows.length, items: rows });
-  } catch (err) {
-    res.status(500).json({ message: "List failed", error: err.message });
-  }
-});
-// ===== END TEMP DEBUG ENDPOINTS =====
+// ===== END DEBUG =====
 
 // 404 fallback
 app.use((req, res) => res.status(404).json({ message: "Route not found" }));
