@@ -1,33 +1,48 @@
-
-// routes/vendorRoutes.js
 const express = require("express");
 const router = express.Router();
 const { Op } = require("sequelize");
 const { Vendor, MenuItem, Order, OrderItem, Payout } = require("../models");
 const { authenticateToken, requireVendor, requireAdmin } = require("../middleware/authMiddleware");
-const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 
 // Only request columns we know exist in the database
 const SAFE_VENDOR_ATTRS = [
-  "id", "UserId", "isOpen", "name", "location", "cuisine", "phone", "isDeleted"
+  "id", "UserId", "isOpen", "name", "location", "cuisine", "phone", "isDeleted", "createdAt", "updatedAt"
 ];
+
+/** Find vendor for a user; create a minimal one if missing. */
+async function getOrCreateVendorForUser(userId) {
+  if (!userId) return null;
+  let v = await Vendor.findOne({ where: { UserId: userId } });
+  if (!v) {
+    v = await Vendor.create({
+      UserId: userId,
+      name: `Vendor ${userId}`,
+      location: "TBD",
+      cuisine: null,
+      phone: null,
+      isOpen: true,
+      isDeleted: false,
+    });
+  }
+  return v;
+}
 
 async function allVendorIdsForUser(userId) {
   const rows = await Vendor.findAll({ where: { UserId: userId }, attributes: ["id"] });
   return rows.map(r => Number(r.id)).filter(Number.isFinite);
 }
 
-/* ============== WHO AM I ============== */
+/* ============== WHO AM I (self-healing) ============== */
 router.get(
   "/me",
   authenticateToken,
   requireVendor,
-  ensureVendorProfile,
   async (req, res) => {
     try {
-      const v = await Vendor.findByPk(req.vendor.id, { attributes: SAFE_VENDOR_ATTRS });
+      const v = await getOrCreateVendorForUser(req.user.id);
       if (!v || v.isDeleted) return res.status(404).json({ message: "Vendor profile not found" });
-      res.json({ vendorId: v.id, userId: req.user.id, ...v.toJSON() });
+      const json = await Vendor.findByPk(v.id, { attributes: SAFE_VENDOR_ATTRS });
+      res.json({ vendorId: json.id, userId: req.user.id, ...json.toJSON() });
     } catch (e) {
       res.status(500).json({ message: "Failed to load vendor profile", error: e.message });
     }
@@ -39,22 +54,20 @@ router.patch(
   "/me/open",
   authenticateToken,
   requireVendor,
-  ensureVendorProfile,
   async (req, res) => {
     try {
       const { isOpen } = req.body;
       if (typeof isOpen !== "boolean") {
         return res.status(400).json({ message: "isOpen must be boolean" });
       }
-      const vendor = await Vendor.findByPk(req.vendor.id, { attributes: SAFE_VENDOR_ATTRS });
-      if (!vendor || vendor.isDeleted) return res.status(404).json({ message: "Vendor not found" });
-      vendor.isOpen = isOpen;
-      await vendor.save();
+      const v = await getOrCreateVendorForUser(req.user.id);
+      if (!v || v.isDeleted) return res.status(404).json({ message: "Vendor not found" });
+      v.isOpen = isOpen;
+      await v.save();
 
       const io = req.app.get("io");
-      if (io) io.emit("vendor:status", { vendorId: vendor.id, isOpen: vendor.isOpen });
-
-      res.json({ message: "Vendor status updated", vendor });
+      if (io) io.emit("vendor:status", { vendorId: v.id, isOpen: v.isOpen });
+      res.json({ message: "Vendor status updated", vendor: v });
     } catch (err) {
       res.status(500).json({ message: "Failed to update vendor status", error: err.message });
     }
@@ -229,7 +242,6 @@ router.get(
   "/:id/payouts",
   authenticateToken,
   requireVendor,
-  ensureVendorProfile,
   async (req, res) => {
     try {
       const idNum = Number(req.params.id);
