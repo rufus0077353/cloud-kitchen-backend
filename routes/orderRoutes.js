@@ -1,8 +1,5 @@
-// routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
-
-// NOTE: You use fn/col/literal in /vendor/daily – import them here.
 const { Op, fn, col, literal } = require("sequelize");
 
 const {
@@ -16,43 +13,36 @@ const {
 } = require("../models");
 
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
-const ensureVendorProfile = require("../middleware/ensureVendorProfile");
+
 const sequelize = Order.sequelize;
 const { notifyUser } = require("../utils/notifications");
 
-/* ---------- config / optional deps ---------- */
 const COMMISSION_PCT = Number(process.env.COMMISSION_PCT || 0.15);
-let Puppeteer = null;
-try { Puppeteer = require("puppeteer"); } catch {}
 
 /* ---------- socket helpers ---------- */
 function emitToVendorHelper(req, vendorId, event, payload) {
-  const fn = req.emitToVendor || req.app.get("emitToVendor");
-  if (typeof fn === "function") fn(vendorId, event, payload);
+  const fnn = req.emitToVendor || req.app.get("emitToVendor");
+  if (typeof fnn === "function") fnn(vendorId, event, payload);
 }
 function emitToUserHelper(req, userId, event, payload) {
-  const fn = req.emitToUser || req.app.get("emitToUser");
-  if (typeof fn === "function") fn(userId, event, payload);
+  const fnn = req.emitToUser || req.app.get("emitToUser");
+  if (typeof fnn === "function") fnn(userId, event, payload);
 }
 
-/* ---------- audit (safe) ---------- */
-async function audit(req, { action, order = null, details = {} }) {
-  try {
-    const { AuditLog } = require("../models");
-    if (!AuditLog || typeof AuditLog.create !== "function") return;
-    await AuditLog.create({
-      userId: req.user?.id ?? null,
-      vendorId: order?.VendorId ?? null,
-      action,
-      details: {
-        orderId: order?.id ?? null,
-        status: order?.status ?? null,
-        ...details,
-      },
+/* ---------- vendor resolver (self-healing) ---------- */
+async function ensureVendorForUser(userId) {
+  if (!userId) return null;
+  let v = await Vendor.findOne({ where: { UserId: userId } });
+  if (!v) {
+    v = await Vendor.create({
+      UserId: userId,
+      name: `Vendor ${userId}`,
+      location: "TBD",
+      isOpen: true,
+      isDeleted: false,
     });
-  } catch (e) {
-    console.warn("AuditLog skipped:", e?.message || e);
   }
+  return v;
 }
 
 /* ---------- helpers ---------- */
@@ -62,51 +52,6 @@ function parsePageParams(q) {
   const pageSizeRaw = Number(q.pageSize);
   const pageSize = Number.isFinite(pageSizeRaw) ? Math.min(100, Math.max(1, pageSizeRaw)) : 20;
   return { page, pageSize };
-}
-
-async function buildVendorScope(req) {
-  const vendors = await Vendor.findAll({ where: { UserId: req.user.id }, attributes: ["id"] });
-  const ids = vendors.map(v => Number(v.id)).filter(Number.isFinite);
-  if (req.vendor?.id && !ids.includes(Number(req.vendor.id))) ids.push(Number(req.vendor.id));
-  return ids.length ? ids : [-1];
-}
-
-async function resolveVendorId(req) {
-  if (req.query?.vendorId && Number.isFinite(Number(req.query.vendorId))) return Number(req.query.vendorId);
-  const candidates = [req.user?.VendorId, req.user?.vendorId, req.user?.vendor?.id, req.vendor?.id]
-    .map(Number).filter(Number.isFinite);
-  if (candidates.length) return candidates[0];
-  try {
-    if (req.user?.id) {
-      const v = await Vendor.findOne({ where: { UserId: req.user.id }, attributes: ["id"] });
-      if (v?.id) return Number(v.id);
-    }
-  } catch {}
-  return null;
-}
-
-/* ---- idempotency helpers ---- */
-const isMissingTableError = (err) =>
-  !!(err?.original?.code === "42P01" || /no such table|does not exist/i.test(err?.message || ""));
-
-async function safeFindIdempotencyKey(key, userId, t) {
-  if (!key || !IdempotencyKey || typeof IdempotencyKey.findOne !== "function") return null;
-  try {
-    return await IdempotencyKey.findOne({ where: { key, userId }, transaction: t });
-  } catch (err) {
-    if (isMissingTableError(err)) return null;
-    throw err;
-  }
-}
-
-async function safeCreateIdempotencyKey(record, t) {
-  if (!IdempotencyKey || typeof IdempotencyKey.create !== "function") return;
-  try {
-    await IdempotencyKey.create(record, { transaction: t });
-  } catch (err) {
-    if (isMissingTableError(err)) return;
-    throw err;
-  }
 }
 
 /* ===================== USER: MY ORDERS ===================== */
@@ -152,20 +97,25 @@ router.get("/my", authenticateToken, async (req, res) => {
   }
 });
 
-/* ===================== VENDOR ORDERS (paginated) ===================== */
+/* =========================
+   VENDOR ORDERS (paginated)
+   GET /api/orders/vendor?page=1&pageSize=200
+   ========================= */
 router.get(
   "/vendor",
   authenticateToken,
   requireVendor,
-  ensureVendorProfile,
   async (req, res) => {
     try {
+      const vendor = await ensureVendorForUser(req.user.id);
+      if (!vendor) return res.status(404).json({ message: "Vendor profile not found" });
+
       const page = Math.max(parseInt(req.query.page || "1", 10), 1);
       const pageSize = Math.max(parseInt(req.query.pageSize || "50", 10), 1);
       const offset = (page - 1) * pageSize;
 
       const { rows, count } = await Order.findAndCountAll({
-        where: { VendorId: req.vendor.id },
+        where: { VendorId: vendor.id },
         include: [
           { model: User, attributes: ["id", "name", "email"] },
           { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
@@ -184,15 +134,19 @@ router.get(
   }
 );
 
-/* ===================== SUMMARY (today/week/month) ===================== */
+/* =========================
+   SUMMARY (today/week/month)
+   GET /api/orders/vendor/summary
+   ========================= */
 router.get(
   "/vendor/summary",
   authenticateToken,
   requireVendor,
-  ensureVendorProfile,
   async (req, res) => {
     try {
-      const VendorId = req.vendor.id;
+      const v = await ensureVendorForUser(req.user.id);
+      if (!v) return res.status(404).json({ message: "Vendor profile not found" });
+      const VendorId = v.id;
 
       const now = new Date();
       const startOfDay   = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -207,10 +161,9 @@ router.get(
       }
 
       const byStatus = {};
-      const statuses = ["pending", "accepted", "ready", "delivered", "rejected"];
-      await Promise.all(
-        statuses.map(async (s) => { byStatus[s] = await Order.count({ where: { VendorId, status: s } }); })
-      );
+      for (const s of ["pending", "accepted", "ready", "delivered", "rejected"]) {
+        byStatus[s] = await Order.count({ where: { VendorId, status: s } });
+      }
 
       const today  = await sumCount({ createdAt: { [Op.gte]: startOfDay } });
       const week   = await sumCount({ createdAt: { [Op.gte]: startOfWeek } });
@@ -225,15 +178,20 @@ router.get(
   }
 );
 
-/* ===================== DAILY TREND ===================== */
+/* =========================
+   DAILY TREND
+   GET /api/orders/vendor/daily?days=14
+   ========================= */
 router.get(
   "/vendor/daily",
   authenticateToken,
   requireVendor,
-  ensureVendorProfile,
   async (req, res) => {
     try {
-      const VendorId = req.vendor.id;
+      const v = await ensureVendorForUser(req.user.id);
+      if (!v) return res.status(404).json({ message: "Vendor profile not found" });
+      const VendorId = v.id;
+
       const days = Math.max(parseInt(req.query.days || "14", 10), 1);
 
       const rows = await Order.findAll({
@@ -264,8 +222,8 @@ router.get(
         d.setHours(0, 0, 0, 0);
         d.setDate(d.getDate() - i);
         const key = d.toISOString().slice(0, 10);
-        const v = map.get(key) || { orders: 0, revenue: 0 };
-        out.push({ date: key, ...v });
+        const vvv = map.get(key) || { orders: 0, revenue: 0 };
+        out.push({ date: key, ...vvv });
       }
 
       res.json(out);

@@ -1,31 +1,26 @@
+
 const express = require("express");
 const router = express.Router();
 const { MenuItem, Vendor } = require("../models");
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
-const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 
-/** Vendor resolver (kept exactly as you wrote) */
-async function resolveVendorId(req) {
-  if (req.vendor?.id) return req.vendor.id;
-  try {
-    if (req.user?.id) {
-      const v = await Vendor.findOne({ where: { UserId: req.user.id }, attributes: ["id"] });
-      if (v) return v.id;
-    }
-  } catch (_) {}
-  return null;
+/** Ensure a Vendor exists for the current user; create if missing. */
+async function ensureVendorForUser(userId) {
+  if (!userId) return null;
+  let v = await Vendor.findOne({ where: { UserId: userId }, attributes: ["id"] });
+  if (!v) v = await Vendor.create({ UserId: userId, name: `Vendor ${userId}`, location: "TBD", isOpen: true });
+  return v.id;
 }
 
-/* ===== VENDOR-SCOPED ===== */
+/* ===================== VENDOR-SCOPED ===================== */
 
 router.get(
   "/mine",
   authenticateToken,
   requireVendor,
-  ensureVendorProfile,
   async (req, res) => {
     try {
-      const vendorId = await resolveVendorId(req);
+      const vendorId = await ensureVendorForUser(req.user.id);
       if (!vendorId) return res.status(400).json({ message: "Vendor profile not found for this account." });
 
       const items = await MenuItem.findAll({
@@ -44,10 +39,9 @@ router.post(
   "/",
   authenticateToken,
   requireVendor,
-  ensureVendorProfile,
   async (req, res) => {
     try {
-      const vendorId = await resolveVendorId(req);
+      const vendorId = await ensureVendorForUser(req.user.id);
       if (!vendorId) return res.status(400).json({ message: "Vendor profile not found for this account." });
 
       const { name, price, description, isAvailable, imageUrl } = req.body || {};
@@ -77,10 +71,9 @@ router.put(
   "/:id",
   authenticateToken,
   requireVendor,
-  ensureVendorProfile,
   async (req, res) => {
     try {
-      const vendorId = await resolveVendorId(req);
+      const vendorId = await ensureVendorForUser(req.user.id);
       if (!vendorId) return res.status(400).json({ message: "Vendor profile not found for this account." });
 
       const item = await MenuItem.findByPk(req.params.id);
@@ -112,10 +105,9 @@ router.delete(
   "/:id",
   authenticateToken,
   requireVendor,
-  ensureVendorProfile,
   async (req, res) => {
     try {
-      const vendorId = await resolveVendorId(req);
+      const vendorId = await ensureVendorForUser(req.user.id);
       if (!vendorId) return res.status(400).json({ message: "Vendor profile not found for this account." });
 
       const item = await MenuItem.findByPk(req.params.id);
@@ -133,7 +125,7 @@ router.delete(
   }
 );
 
-/* ===== PUBLIC ===== */
+/* ===================== PUBLIC ===================== */
 
 router.get("/", async (req, res) => {
   try {

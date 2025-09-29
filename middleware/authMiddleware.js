@@ -1,6 +1,6 @@
-
 const jwt = require("jsonwebtoken");
 const { User, Vendor } = require("../models");
+
 const JWT_SECRET = process.env.JWT_SECRET || "nani@143";
 
 exports.authenticateToken = async (req, res, next) => {
@@ -10,12 +10,15 @@ exports.authenticateToken = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    const user = await User.findByPk(decoded.id);
+
+    // FIX: use decoded.userId (not decoded.id)
+    const user = await User.findByPk(decoded.userId);
     if (!user) return res.status(404).json({ message: "User not found" });
 
     req.user = { id: user.id, role: user.role };
 
-    if (user.role === "vendor" && Vendor) {
+    // Attach vendorId if vendor exists
+    if (user.role === "vendor") {
       const v = await Vendor.findOne({ where: { UserId: user.id }, attributes: ["id"] });
       if (v) req.user.vendorId = v.id;
     }
