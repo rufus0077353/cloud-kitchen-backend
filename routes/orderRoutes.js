@@ -1,3 +1,5 @@
+
+// routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
 const { Op, fn, col, literal } = require("sequelize");
@@ -13,36 +15,43 @@ const {
 } = require("../models");
 
 const { authenticateToken, requireVendor } = require("../middleware/authMiddleware");
-
+const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 const sequelize = Order.sequelize;
 const { notifyUser } = require("../utils/notifications");
 
+/* ---------- config / optional deps ---------- */
 const COMMISSION_PCT = Number(process.env.COMMISSION_PCT || 0.15);
+let Puppeteer = null;
+try { Puppeteer = require("puppeteer"); } catch {}
 
 /* ---------- socket helpers ---------- */
 function emitToVendorHelper(req, vendorId, event, payload) {
-  const fnn = req.emitToVendor || req.app.get("emitToVendor");
-  if (typeof fnn === "function") fnn(vendorId, event, payload);
+  const fn = req.emitToVendor || req.app.get("emitToVendor");
+  if (typeof fn === "function") fn(vendorId, event, payload);
 }
 function emitToUserHelper(req, userId, event, payload) {
-  const fnn = req.emitToUser || req.app.get("emitToUser");
-  if (typeof fnn === "function") fnn(userId, event, payload);
+  const fn = req.emitToUser || req.app.get("emitToUser");
+  if (typeof fn === "function") fn(userId, event, payload);
 }
 
-/* ---------- vendor resolver (self-healing) ---------- */
-async function ensureVendorForUser(userId) {
-  if (!userId) return null;
-  let v = await Vendor.findOne({ where: { UserId: userId } });
-  if (!v) {
-    v = await Vendor.create({
-      UserId: userId,
-      name: `Vendor ${userId}`,
-      location: "TBD",
-      isOpen: true,
-      isDeleted: false,
+/* ---------- audit (safe) ---------- */
+async function audit(req, { action, order = null, details = {} }) {
+  try {
+    const { AuditLog } = require("../models");
+    if (!AuditLog || typeof AuditLog.create !== "function") return;
+    await AuditLog.create({
+      userId: req.user?.id ?? null,
+      vendorId: order?.VendorId ?? null,
+      action,
+      details: {
+        orderId: order?.id ?? null,
+        status: order?.status ?? null,
+        ...details,
+      },
     });
+  } catch (e) {
+    console.warn("AuditLog skipped:", e?.message || e);
   }
-  return v;
 }
 
 /* ---------- helpers ---------- */
@@ -52,6 +61,60 @@ function parsePageParams(q) {
   const pageSizeRaw = Number(q.pageSize);
   const pageSize = Number.isFinite(pageSizeRaw) ? Math.min(100, Math.max(1, pageSizeRaw)) : 20;
   return { page, pageSize };
+}
+
+// collect ALL VendorIds for this user (covers historical vendor rows)
+async function buildVendorScope(req) {
+  const vendors = await Vendor.findAll({
+    where: { UserId: req.user.id },
+    attributes: ["id"],
+  });
+  const ids = vendors.map(v => Number(v.id)).filter(Number.isFinite);
+  if (req.vendor?.id && !ids.includes(Number(req.vendor.id))) ids.push(Number(req.vendor.id));
+  return ids.length ? ids : [-1];
+}
+
+// Robust vendorId resolver: query -> token/middleware -> DB lookup
+async function resolveVendorId(req) {
+  if (req.query?.vendorId && Number.isFinite(Number(req.query.vendorId))) return Number(req.query.vendorId);
+  const candidates = [
+    req.user?.VendorId,
+    req.user?.vendorId,
+    req.user?.vendor?.id,
+    req.vendor?.id,
+  ].map(n => Number(n)).filter(n => Number.isFinite(n));
+  if (candidates.length) return candidates[0];
+  try {
+    if (req.user?.id) {
+      const v = await Vendor.findOne({ where: { UserId: req.user.id }, attributes: ["id"] });
+      if (v?.id) return Number(v.id);
+    }
+  } catch {}
+  return null;
+}
+
+// ---- idempotency helpers (safe if table/model missing) ----
+const isMissingTableError = (err) =>
+  !!(err?.original?.code === "42P01" || /no such table|does not exist/i.test(err?.message || ""));
+
+async function safeFindIdempotencyKey(key, userId, t) {
+  if (!key || !IdempotencyKey || typeof IdempotencyKey.findOne !== "function") return null;
+  try {
+    return await IdempotencyKey.findOne({ where: { key, userId }, transaction: t });
+  } catch (err) {
+    if (isMissingTableError(err)) return null;
+    throw err;
+  }
+}
+
+async function safeCreateIdempotencyKey(record, t) {
+  if (!IdempotencyKey || typeof IdempotencyKey.create !== "function") return;
+  try {
+    await IdempotencyKey.create(record, { transaction: t });
+  } catch (err) {
+    if (isMissingTableError(err)) return;
+    throw err;
+  }
 }
 
 /* ===================== USER: MY ORDERS ===================== */
@@ -105,17 +168,15 @@ router.get(
   "/vendor",
   authenticateToken,
   requireVendor,
+  ensureVendorProfile,
   async (req, res) => {
     try {
-      const vendor = await ensureVendorForUser(req.user.id);
-      if (!vendor) return res.status(404).json({ message: "Vendor profile not found" });
-
       const page = Math.max(parseInt(req.query.page || "1", 10), 1);
       const pageSize = Math.max(parseInt(req.query.pageSize || "50", 10), 1);
       const offset = (page - 1) * pageSize;
 
       const { rows, count } = await Order.findAndCountAll({
-        where: { VendorId: vendor.id },
+        where: { VendorId: req.vendor.id },
         include: [
           { model: User, attributes: ["id", "name", "email"] },
           { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
@@ -142,11 +203,10 @@ router.get(
   "/vendor/summary",
   authenticateToken,
   requireVendor,
+  ensureVendorProfile,
   async (req, res) => {
     try {
-      const v = await ensureVendorForUser(req.user.id);
-      if (!v) return res.status(404).json({ message: "Vendor profile not found" });
-      const VendorId = v.id;
+      const VendorId = req.vendor.id;
 
       const now = new Date();
       const startOfDay   = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -161,13 +221,14 @@ router.get(
       }
 
       const byStatus = {};
-      for (const s of ["pending", "accepted", "ready", "delivered", "rejected"]) {
+      const statuses = ["pending", "accepted", "ready", "delivered", "rejected"];
+      await Promise.all(statuses.map(async (s) => {
         byStatus[s] = await Order.count({ where: { VendorId, status: s } });
-      }
+      }));
 
-      const today  = await sumCount({ createdAt: { [Op.gte]: startOfDay } });
-      const week   = await sumCount({ createdAt: { [Op.gte]: startOfWeek } });
-      const month  = await sumCount({ createdAt: { [Op.gte]: startOfMonth } });
+      const today = await sumCount({ createdAt: { [Op.gte]: startOfDay } });
+      const week  = await sumCount({ createdAt: { [Op.gte]: startOfWeek } });
+      const month = await sumCount({ createdAt: { [Op.gte]: startOfMonth } });
       const totals = await sumCount();
 
       res.json({ today, week, month, totals, byStatus });
@@ -181,17 +242,16 @@ router.get(
 /* =========================
    DAILY TREND
    GET /api/orders/vendor/daily?days=14
+   Returns: [{ date: 'YYYY-MM-DD', orders, revenue }]
    ========================= */
 router.get(
   "/vendor/daily",
   authenticateToken,
   requireVendor,
+  ensureVendorProfile,
   async (req, res) => {
     try {
-      const v = await ensureVendorForUser(req.user.id);
-      if (!v) return res.status(404).json({ message: "Vendor profile not found" });
-      const VendorId = v.id;
-
+      const VendorId = req.vendor.id;
       const days = Math.max(parseInt(req.query.days || "14", 10), 1);
 
       const rows = await Order.findAll({
@@ -222,8 +282,8 @@ router.get(
         d.setHours(0, 0, 0, 0);
         d.setDate(d.getDate() - i);
         const key = d.toISOString().slice(0, 10);
-        const vvv = map.get(key) || { orders: 0, revenue: 0 };
-        out.push({ date: key, ...vvv });
+        const v = map.get(key) || { orders: 0, revenue: 0 };
+        out.push({ date: key, ...v });
       }
 
       res.json(out);
@@ -302,7 +362,6 @@ router.post("/", authenticateToken, async (req, res) => {
       return res.status(400).json({ message: "At least one item is required" });
     }
 
-    // STEP 1: idempotency lookup
     if (idemKey) {
       const existingKey = await safeFindIdempotencyKey(idemKey, req.user.id, t);
       if (existingKey?.orderId) {
@@ -319,7 +378,6 @@ router.post("/", authenticateToken, async (req, res) => {
       }
     }
 
-    // Validate / normalize items
     const ids = [];
     const cleanItems = [];
     for (const it of items) {
@@ -336,7 +394,6 @@ router.post("/", authenticateToken, async (req, res) => {
       cleanItems.push({ MenuItemId: mid, quantity: qty });
     }
 
-    // Ensure all items belong to this vendor + get prices
     const menuRows = await MenuItem.findAll({
       where: { id: ids, VendorId: vendorIdNum },
       attributes: ["id", "price", "name", "VendorId"],
@@ -362,7 +419,6 @@ router.post("/", authenticateToken, async (req, res) => {
       0
     );
 
-    // Create order
     const order = await Order.create(
       {
         UserId: req.user.id,
@@ -377,7 +433,6 @@ router.post("/", authenticateToken, async (req, res) => {
       { transaction: t }
     );
 
-    // Create line items
     await OrderItem.bulkCreate(
       cleanItems.map((it) => ({
         OrderId: order.id,
@@ -387,19 +442,16 @@ router.post("/", authenticateToken, async (req, res) => {
       { transaction: t }
     );
 
-    // Auto-pay for mock online
     if (paymentMethod === "mock_online") {
       order.paymentStatus = "paid";
       order.paidAt = new Date();
       await order.save({ transaction: t });
     }
 
-    // idempotency key store
     if (idemKey) {
       await safeCreateIdempotencyKey({ key: idemKey, userId: req.user.id, orderId: order.id }, t);
     }
 
-    // Reload full order
     const fullOrder = await Order.findByPk(order.id, {
       include: [
         { model: User, attributes: ["id", "name", "email"] },
@@ -411,7 +463,6 @@ router.post("/", authenticateToken, async (req, res) => {
 
     await t.commit();
 
-    // Live updates
     emitToVendorHelper(req, vendorIdNum, "order:new", fullOrder);
     emitToUserHelper(req, req.user.id, "order:new", fullOrder);
 
@@ -570,7 +621,6 @@ router.patch(
         console.warn("push notify failed:", e?.message);
       }
 
-      // create/update payout when delivered & paid
       if (statusRaw === "delivered" && order.paymentStatus === "paid" && Payout?.upsert) {
         const gross = Number(order.totalAmount || 0);
         const rate =
@@ -582,7 +632,7 @@ router.patch(
         const payout = Math.max(0, gross - commission);
 
         await Payout.upsert({
-          orderId: order.id,
+          OrderId: order.id,        // make sure this matches your model FK name
           VendorId: order.VendorId,
           grossAmount: gross,
           commissionAmount: commission,
