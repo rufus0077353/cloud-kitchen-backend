@@ -1,16 +1,17 @@
 
-// routes/adminRoutes.js
 const express = require("express");
 const router = express.Router();
 const bcrypt = require("bcrypt");
 const { Op, Sequelize } = require("sequelize");
 
-const { User, Vendor, Order, MenuItem } = require("../models");
+// ✅ include Payout here as well
+const { User, Vendor, Order, MenuItem, Payout } = require("../models");
 const { authenticateToken, requireAdmin } = require("../middleware/authMiddleware");
 
 // ---------- config ----------
 const DEFAULT_PLATFORM_RATE = Number(process.env.PLATFORM_RATE || 0.15);
-const NON_REVENUE_STATUSES = ["rejected", "canceled", "cancelled"];
+// ✅ only enum values
+const NON_REVENUE_STATUSES = ["rejected"];
 
 // ---------- helpers ----------
 const money = (n) => Number((Number(n || 0)).toFixed(2));
@@ -55,8 +56,6 @@ async function ensureVendorProfileForUser(user) {
 //  OVERVIEW  →  /api/admin/overview
 // ======================================================
 
-// --- OVERVIEW: totals & commissions ---
-
 router.get("/overview", authenticateToken, requireAdmin, async (_req, res) => {
   try {
     const [totalUsers, totalVendors, totalOrders] = await Promise.all([
@@ -65,8 +64,8 @@ router.get("/overview", authenticateToken, requireAdmin, async (_req, res) => {
       Order.count(),
     ]);
 
-    // Revenue (paid + non-cancelled)
-    const CANCEL = ["rejected", "cancelled", "canceled"];
+    // Revenue (paid + non-revenue statuses excluded)
+    const CANCEL = ["rejected"]; // ✅ enum-safe
     const PAID = "paid";
 
     const eligibleOrders = await Order.findAll({
@@ -80,7 +79,6 @@ router.get("/overview", authenticateToken, requireAdmin, async (_req, res) => {
     const DEFAULT_RATE = Number(process.env.PLATFORM_RATE || 0.15);
 
     const commissionOf = (o) => {
-      // handle missing fields gracefully
       const explicit =
         o.commission ??
         o.commissionAmount ??
@@ -130,7 +128,6 @@ router.get("/overview", authenticateToken, requireAdmin, async (_req, res) => {
 
 // ======================================================
 //  USERS (paginated)  →  /api/admin/users
-//  q, role, status, page, pageSize
 // ======================================================
 
 router.get("/users", authenticateToken, requireAdmin, async (req, res) => {
@@ -143,7 +140,7 @@ router.get("/users", authenticateToken, requireAdmin, async (req, res) => {
 
     const where = {};
     if (role)   where.role = role;
-    if (status) where.status = status; // ignored if column doesn't exist
+    if (status) where.status = status;
     if (search) {
       where[Op.or] = [
         { name:  { [Op.iLike]: `%${search}%` } },
@@ -172,11 +169,7 @@ router.get("/users", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-/** CREATE USER (Admin)
- * Body: { name, email, password, role }  role ∈ ['user','vendor','admin']
- * - hashes password
- * - if role=vendor, auto-creates Vendor row linked via UserId
- */
+/** CREATE USER (Admin) */
 router.post("/users", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { name, email, password, role = "user" } = req.body || {};
@@ -207,11 +200,7 @@ router.post("/users", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-/** UPDATE USER (Admin)
- * Optional: name, email, password, role, status
- * - hashes password when provided
- * - if role switches to vendor, ensures Vendor profile exists
- */
+/** UPDATE USER (Admin) */
 router.put("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { name, email, password, role, status } = req.body || {};
@@ -240,7 +229,7 @@ router.put("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// PATCH /api/admin/users/:id   { isDeleted: boolean }
+// PATCH /api/admin/users/:id
 router.patch("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -251,7 +240,6 @@ router.patch("/users/:id", authenticateToken, requireAdmin, async (req, res) => 
     const user = await User.findByPk(id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    // ensure column exists on your model (see section 2)
     user.isDeleted = isDeleted;
     await user.save();
 
@@ -264,14 +252,13 @@ router.patch("/users/:id", authenticateToken, requireAdmin, async (req, res) => 
   }
 });
 
-// DELETE /api/admin/users/:id  (hard delete; also remove vendor profile if any)
+// DELETE /api/admin/users/:id
 router.delete("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const user = await User.findByPk(id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    // If this user has a vendor profile, delete it first (or rely on FK cascade)
     await Vendor.destroy({ where: { UserId: id } });
     await user.destroy();
 
@@ -281,10 +268,7 @@ router.delete("/users/:id", authenticateToken, requireAdmin, async (req, res) =>
   }
 });
 
-/** CHANGE ROLE ONLY (simple endpoint)
- * Body: { role }  role ∈ ['user','vendor','admin']
- * - creates Vendor profile when role becomes 'vendor'
- */
+/** CHANGE ROLE ONLY */
 router.put("/users/:id/role", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { role } = req.body || {};
@@ -311,9 +295,7 @@ router.put("/users/:id/role", authenticateToken, requireAdmin, async (req, res) 
   }
 });
 
-/** Backwards-compatible promote route (kept)
- * Promotes to vendor and ensures vendor profile exists
- */
+/** Backwards-compatible promote route */
 router.put("/promote/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const user = await User.findByPk(req.params.id);
@@ -334,7 +316,6 @@ router.put("/promote/:id", authenticateToken, requireAdmin, async (req, res) => 
 
 // ======================================================
 //  VENDORS (paginated)  →  /api/admin/vendors
-//  q, status=open|closed, userId, page, pageSize
 // ======================================================
 router.get("/vendors", authenticateToken, requireAdmin, async (req, res) => {
   try {
@@ -371,7 +352,6 @@ router.get("/vendors", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// Create / Update / Delete vendors
 router.post("/vendors", authenticateToken, requireAdmin, async (req, res) => {
   const { name, cuisine, location, UserId, isOpen, commissionRate } = req.body || {};
   if (!name || !cuisine) return res.status(400).json({ message: "Name and cuisine are required" });
@@ -405,7 +385,7 @@ router.put("/vendors/:id", authenticateToken, requireAdmin, async (req, res) => 
     if (typeof isOpen === "boolean") vendor.isOpen = isOpen;
     if (commissionRate != null && commissionRate !== "") {
       let rateNum = Number(commissionRate);
-      if (rateNum > 1) rateNum = rateNum / 100; // allow "15" to mean 15%
+      if (rateNum > 1) rateNum = rateNum / 100;
       vendor.commissionRate = rateNum;
     }
 
@@ -427,7 +407,7 @@ router.delete("/vendors/:id", authenticateToken, requireAdmin, async (req, res) 
   }
 });
 
-// Quick vendor filter list used by UI chips/search
+// Quick vendor filter
 router.get("/filter", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const where = {};
@@ -454,7 +434,6 @@ router.get("/filter", authenticateToken, requireAdmin, async (req, res) => {
 
 // ======================================================
 //  ORDERS (paginated)  →  /api/admin/orders
-//  page, pageSize, status, paymentStatus, vendorId, userId, from, to
 // ======================================================
 router.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   try {
@@ -515,7 +494,7 @@ router.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
 });
 
 // ======================================================
-//  INSIGHTS (unchanged)
+//  INSIGHTS
 // ======================================================
 router.get("/insights", authenticateToken, requireAdmin, async (_req, res) => {
   try {
@@ -544,8 +523,9 @@ router.get("/insights", authenticateToken, requireAdmin, async (_req, res) => {
   }
 });
 
-
-// routes/adminRoutes.js (or routes/payoutRoutes.js)
+// ======================================================
+//  PAYOUTS ADMIN PATCH
+// ======================================================
 router.patch("/payouts/:id", authenticateToken, requireAdmin, async (req, res) => {
   const { status } = req.body || {};
   const allowed = ["pending", "scheduled", "paid"];
@@ -561,7 +541,7 @@ router.patch("/payouts/:id", authenticateToken, requireAdmin, async (req, res) =
 
   // 🔔 EMIT so vendor sees the update
   req.app.get("emitToVendor")(payout.VendorId, "payout:update", {
-    orderId: payout.orderId,
+    orderId: payout.OrderId, // ✅ correct casing
     VendorId: payout.VendorId,
     payoutAmount: payout.payoutAmount,
     status: payout.status,
