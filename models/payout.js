@@ -1,3 +1,4 @@
+// models/Payout.js
 module.exports = (sequelize, DataTypes) => {
   const Payout = sequelize.define(
     "Payout",
@@ -5,7 +6,7 @@ module.exports = (sequelize, DataTypes) => {
       grossAmount:      { type: DataTypes.FLOAT, allowNull: false, defaultValue: 0 },
       commissionAmount: { type: DataTypes.FLOAT, allowNull: false, defaultValue: 0 },
       payoutAmount:     { type: DataTypes.FLOAT, allowNull: false, defaultValue: 0 },
-      status:           { type: DataTypes.ENUM("pending","scheduled","paid"), defaultValue: "pending" },
+      status:           { type: DataTypes.ENUM("pending", "scheduled", "paid"), defaultValue: "pending" },
       scheduledAt:      { type: DataTypes.DATE, allowNull: true },
       paidAt:           { type: DataTypes.DATE, allowNull: true },
     },
@@ -13,8 +14,9 @@ module.exports = (sequelize, DataTypes) => {
   );
 
   Payout.associate = (models) => {
+    // NOTE the exact FK field names
     Payout.belongsTo(models.Vendor, { foreignKey: "VendorId", onDelete: "CASCADE" });
-    Payout.belongsTo(models.Order,  { foreignKey: "OrderId", onDelete: "SET NULL" }); // NOTE: OrderId (not orderId)
+    Payout.belongsTo(models.Order,  { foreignKey: "OrderId", onDelete: "SET NULL" });
   };
 
   return Payout;
