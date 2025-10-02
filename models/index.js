@@ -1,4 +1,4 @@
-
+// models/index.js
 const Sequelize = require("sequelize");
 const sequelize = require("../config/db");
 
@@ -6,55 +6,97 @@ const db = {};
 db.Sequelize = Sequelize;
 db.sequelize = sequelize;
 
-// Models
-db.User          = require("./User")(sequelize, Sequelize.DataTypes);
-db.Vendor        = require("./Vendor")(sequelize, Sequelize.DataTypes);
-db.MenuItem      = require("./MenuItem")(sequelize, Sequelize.DataTypes);
-db.Order         = require("./Order")(sequelize, Sequelize.DataTypes);
-db.OrderItem     = require("./OrderItem")(sequelize, Sequelize.DataTypes);
-db.Payout        = require("./Payout")(sequelize, Sequelize.DataTypes);
-db.PushSubscription = require("./PushSubscription")(sequelize, Sequelize.DataTypes);
+/* ------------------ safe model loader ------------------ */
+function loadModel(name) {
+  try {
+    const mod = require(`./${name}`); // ensure file name matches exactly on Linux
+    if (typeof mod === "function") {
+      return mod(sequelize, Sequelize.DataTypes);
+    }
+    console.warn(`[models] ${name} did not export a factory function — skipped`);
+    return null;
+  } catch (e) {
+    console.warn(`[models] Skipping ${name}: ${e.message}`);
+    return null;
+  }
+}
 
-// Associations
-db.User.hasOne(db.Vendor, { foreignKey: "UserId", onDelete: "CASCADE" });
-db.Vendor.belongsTo(db.User, { foreignKey: "UserId" });
+/* ------------------ load models ------------------ */
+db.User             = loadModel("User");
+db.Vendor           = loadModel("Vendor");
+db.MenuItem         = loadModel("MenuItem");
+db.Order            = loadModel("Order");
+db.OrderItem        = loadModel("OrderItem");
+db.Payout           = loadModel("Payout");            // <-- must exist as ./Payout.js (capital P)
+db.PushSubscription = loadModel("PushSubscription");  // optional, if file exists
 
-db.Vendor.hasMany(db.MenuItem, { foreignKey: "VendorId", onDelete: "CASCADE" });
-db.MenuItem.belongsTo(db.Vendor, { foreignKey: "VendorId" });
+/* ------------------ associations (guarded) ------------------ */
+// User ↔ Vendor (1:1)
+if (db.User && db.Vendor) {
+  db.User.hasOne(db.Vendor, { foreignKey: "UserId", onDelete: "CASCADE" });
+  db.Vendor.belongsTo(db.User, { foreignKey: "UserId" });
+}
 
-db.User.hasMany(db.Order, { foreignKey: "UserId", onDelete: "CASCADE" });
-db.Order.belongsTo(db.User, { foreignKey: "UserId" });
+// Vendor ↔ MenuItem (1:M)
+if (db.Vendor && db.MenuItem) {
+  db.Vendor.hasMany(db.MenuItem, { foreignKey: "VendorId", onDelete: "CASCADE" });
+  db.MenuItem.belongsTo(db.Vendor, { foreignKey: "VendorId" });
+}
 
-db.Vendor.hasMany(db.Order, { foreignKey: "VendorId", onDelete: "CASCADE" });
-db.Order.belongsTo(db.Vendor, { foreignKey: "VendorId" });
+// User ↔ Order (1:M)
+if (db.User && db.Order) {
+  db.User.hasMany(db.Order, { foreignKey: "UserId", onDelete: "CASCADE" });
+  db.Order.belongsTo(db.User, { foreignKey: "UserId" });
+}
 
-db.Order.hasMany(db.OrderItem, { foreignKey: "OrderId", onDelete: "CASCADE" });
-db.OrderItem.belongsTo(db.Order, { foreignKey: "OrderId" });
+// Vendor ↔ Order (1:M)
+if (db.Vendor && db.Order) {
+  db.Vendor.hasMany(db.Order, { foreignKey: "VendorId", onDelete: "CASCADE" });
+  db.Order.belongsTo(db.Vendor, { foreignKey: "VendorId" });
+}
 
-db.MenuItem.hasMany(db.OrderItem, { foreignKey: "MenuItemId", onDelete: "CASCADE" });
-db.OrderItem.belongsTo(db.MenuItem, { foreignKey: "MenuItemId" });
+// Order ↔ OrderItem (1:M)
+if (db.Order && db.OrderItem) {
+  db.Order.hasMany(db.OrderItem, { foreignKey: "OrderId", onDelete: "CASCADE" });
+  db.OrderItem.belongsTo(db.Order, { foreignKey: "OrderId" });
+}
 
-db.User.hasMany(db.PushSubscription, { foreignKey: "userId", onDelete: "CASCADE" });
-db.PushSubscription.belongsTo(db.User, { foreignKey: "userId" });
+// MenuItem ↔ OrderItem (1:M)
+if (db.MenuItem && db.OrderItem) {
+  db.MenuItem.hasMany(db.OrderItem, { foreignKey: "MenuItemId", onDelete: "CASCADE" });
+  db.OrderItem.belongsTo(db.MenuItem, { foreignKey: "MenuItemId" });
+}
 
-// NEW: Vendor ↔ Payout (1:M)
-db.Vendor.hasMany(db.Payout, { foreignKey: "VendorId", onDelete: "CASCADE" });
-db.Payout.belongsTo(db.Vendor, { foreignKey: "VendorId" });
+// User ↔ PushSubscription (1:M) — optional
+if (db.User && db.PushSubscription) {
+  db.User.hasMany(db.PushSubscription, { foreignKey: "userId", onDelete: "CASCADE" });
+  db.PushSubscription.belongsTo(db.User, { foreignKey: "userId" });
+}
 
-// NEW: Order ↔ Payout (1:1)
-db.Order.hasOne(db.Payout, { foreignKey: "OrderId", onDelete: "SET NULL" });
-db.Payout.belongsTo(db.Order, { foreignKey: "OrderId" });
+// Vendor ↔ Payout (1:M)
+if (db.Vendor && db.Payout) {
+  db.Vendor.hasMany(db.Payout, { foreignKey: "VendorId", onDelete: "CASCADE" });
+  db.Payout.belongsTo(db.Vendor, { foreignKey: "VendorId" });
+}
 
-// Convenience M:N
-db.Order.belongsToMany(db.MenuItem, {
-  through: db.OrderItem,
-  foreignKey: "OrderId",
-  otherKey: "MenuItemId",
-});
-db.MenuItem.belongsToMany(db.Order, {
-  through: db.OrderItem,
-  foreignKey: "MenuItemId",
-  otherKey: "OrderId",
-});
+// Order ↔ Payout (1:1)
+if (db.Order && db.Payout) {
+  db.Order.hasOne(db.Payout, { foreignKey: "OrderId", onDelete: "SET NULL" });
+  db.Payout.belongsTo(db.Order, { foreignKey: "OrderId" });
+}
+
+// Convenience M:N: Order ↔ MenuItem via OrderItem
+if (db.Order && db.MenuItem && db.OrderItem) {
+  db.Order.belongsToMany(db.MenuItem, {
+    through: db.OrderItem,
+    foreignKey: "OrderId",
+    otherKey: "MenuItemId",
+  });
+  db.MenuItem.belongsToMany(db.Order, {
+    through: db.OrderItem,
+    foreignKey: "MenuItemId",
+    otherKey: "OrderId",
+  });
+}
 
 module.exports = db;
