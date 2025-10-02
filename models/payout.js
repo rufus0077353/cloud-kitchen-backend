@@ -1,3 +1,4 @@
+
 // models/Payout.js
 module.exports = (sequelize, DataTypes) => {
   const Payout = sequelize.define(
@@ -14,7 +15,6 @@ module.exports = (sequelize, DataTypes) => {
   );
 
   Payout.associate = (models) => {
-    // NOTE the exact FK field names
     Payout.belongsTo(models.Vendor, { foreignKey: "VendorId", onDelete: "CASCADE" });
     Payout.belongsTo(models.Order,  { foreignKey: "OrderId", onDelete: "SET NULL" });
   };
