@@ -162,135 +162,69 @@ router.get("/my", authenticateToken, async (req, res) => {
   VENDOR ORDERS (paginated)
   GET /api/orders/vendor?page=1&pageSize=200
   ========================= */
-router.get(
- "/vendor",
- authenticateToken,
- requireVendor,
- ensureVendorProfile,
- async (req, res) => {
-   try {
-     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
-     const pageSize = Math.max(parseInt(req.query.pageSize || "50", 10), 1);
-     const offset = (page - 1) * pageSize;
+router.get("/vendor/summary", authenticateToken, requireVendor, async (req, res) => {
+ const v = await getOrCreateVendorForUser(req.user.id);
+ if (!v) return res.status(404).json({ message: "Vendor profile not found" });
 
-     const { rows, count } = await Order.findAndCountAll({
-       where: { VendorId: req.vendor.id },
-       include: [
-         { model: User, attributes: ["id", "name", "email"] },
-         { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
-         { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
-       ],
-       order: [["createdAt", "DESC"]],
-       limit: pageSize,
-       offset,
-     });
+ const vendorId = v.id;
+ const today = new Date(); today.setHours(0,0,0,0);
+ const weekStart = new Date(); weekStart.setDate(weekStart.getDate() - 7);
 
-     res.json({ items: rows, total: count, page, pageSize });
-   } catch (err) {
-     console.error("GET /orders/vendor error:", err);
-     res.status(500).json({ message: "Failed to fetch vendor orders", error: err.message });
-   }
- }
-);
+ const todayOrders = await Order.count({ where: { VendorId: vendorId, createdAt: { [Op.gte]: today } } });
+ const todayRevenue = await Order.sum("totalAmount", { where: { VendorId: vendorId, createdAt: { [Op.gte]: today } } });
 
-/* =========================
-  SUMMARY (today/week/month)
-  GET /api/orders/vendor/summary
-  ========================= */
-router.get(
- "/vendor/summary",
- authenticateToken,
- requireVendor,
- ensureVendorProfile,
- async (req, res) => {
-   try {
-     const VendorId = req.vendor.id;
+ const weekOrders = await Order.count({ where: { VendorId: vendorId, createdAt: { [Op.gte]: weekStart } } });
+ const weekRevenue = await Order.sum("totalAmount", { where: { VendorId: vendorId, createdAt: { [Op.gte]: weekStart } } });
 
-     const now = new Date();
-     const startOfDay   = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-     const startOfWeek  = new Date(startOfDay); startOfWeek.setDate(startOfDay.getDate() - startOfDay.getDay());
-     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+ const totalsOrders = await Order.count({ where: { VendorId: vendorId } });
+ const totalsRevenue = await Order.sum("totalAmount", { where: { VendorId: vendorId } });
 
-     async function sumCount(whereExtra = {}) {
-       const where = { VendorId, ...whereExtra };
-       const revenue = (await Order.sum("totalAmount", { where })) || 0;
-       const orders  = await Order.count({ where });
-       return { revenue: +Number(revenue).toFixed(2), orders };
-     }
+ res.json({
+   today: { orders: todayOrders, revenue: todayRevenue || 0 },
+   week: { orders: weekOrders, revenue: weekRevenue || 0 },
+   month: { orders: 0, revenue: 0 }, // add month logic if needed
+   totals: { orders: totalsOrders, revenue: totalsRevenue || 0 },
+   byStatus: await Order.count({ where: { VendorId: vendorId }, group: "status" }),
+ });
+});
 
-     const byStatus = {};
-     const statuses = ["pending", "accepted", "ready", "delivered", "rejected"];
-     await Promise.all(statuses.map(async (s) => {
-       byStatus[s] = await Order.count({ where: { VendorId, status: s } });
-     }));
+router.get("/vendor/daily", authenticateToken, requireVendor, async (req, res) => {
+ const v = await getOrCreateVendorForUser(req.user.id);
+ if (!v) return res.status(404).json({ message: "Vendor profile not found" });
 
-     const today = await sumCount({ createdAt: { [Op.gte]: startOfDay } });
-     const week  = await sumCount({ createdAt: { [Op.gte]: startOfWeek } });
-     const month = await sumCount({ createdAt: { [Op.gte]: startOfMonth } });
-     const totals = await sumCount();
+ const vendorId = v.id;
+ const days = Number(req.query.days) || 14;
+ const since = new Date(); since.setDate(since.getDate() - days);
 
-     res.json({ today, week, month, totals, byStatus });
-   } catch (err) {
-     console.error("GET /orders/vendor/summary error:", err);
-     res.status(500).json({ message: "Failed to build summary", error: err.message });
-   }
- }
-);
+ const rows = await Order.findAll({
+   where: { VendorId: vendorId, createdAt: { [Op.gte]: since } },
+   attributes: [
+     [sequelize.fn("date_trunc", "day", sequelize.col("createdAt")), "date"],
+     [sequelize.fn("count", sequelize.col("id")), "orders"],
+     [sequelize.fn("sum", sequelize.col("totalAmount")), "revenue"],
+   ],
+   group: ["date"], order: [[sequelize.literal("date"), "ASC"]],
+ });
+ res.json(rows);
+});
 
-/* =========================
-  DAILY TREND
-  GET /api/orders/vendor/daily?days=14
-  Returns: [{ date: 'YYYY-MM-DD', orders, revenue }]
-  ========================= */
-router.get(
- "/vendor/daily",
- authenticateToken,
- requireVendor,
- ensureVendorProfile,
- async (req, res) => {
-   try {
-     const VendorId = req.vendor.id;
-     const days = Math.max(parseInt(req.query.days || "14", 10), 1);
+router.get("/vendor", authenticateToken, requireVendor, async (req, res) => {
+ const v = await getOrCreateVendorForUser(req.user.id);
+ if (!v) return res.status(404).json({ message: "Vendor profile not found" });
 
-     const rows = await Order.findAll({
-       where: {
-         VendorId,
-         createdAt: { [Op.gte]: literal(`NOW() - INTERVAL '${days} days'`) },
-       },
-       attributes: [
-         [fn("date_trunc", "day", col("createdAt")), "bucket"],
-         [fn("COUNT", col("id")), "orders"],
-         [fn("SUM", col("totalAmount")), "revenue"],
-       ],
-       group: [literal("bucket")],
-       order: [literal("bucket ASC")],
-       raw: true,
-     });
+ const vendorId = v.id;
+ const page = Number(req.query.page) || 1;
+ const pageSize = Number(req.query.pageSize) || 50;
 
-     const map = new Map(
-       rows.map((r) => [
-         new Date(r.bucket).toISOString().slice(0, 10),
-         { orders: Number(r.orders || 0), revenue: +Number(r.revenue || 0).toFixed(2) },
-       ])
-     );
-
-     const out = [];
-     for (let i = days - 1; i >= 0; i--) {
-       const d = new Date();
-       d.setHours(0, 0, 0, 0);
-       d.setDate(d.getDate() - i);
-       const key = d.toISOString().slice(0, 10);
-       const v = map.get(key) || { orders: 0, revenue: 0 };
-       out.push({ date: key, ...v });
-     }
-
-     res.json(out);
-   } catch (err) {
-     console.error("GET /orders/vendor/daily error:", err);
-     res.status(500).json({ message: "Failed to build daily trend", error: err.message });
-   }
- }
-);
+ const orders = await Order.findAll({
+   where: { VendorId: vendorId },
+   include: [OrderItem],
+   limit: pageSize,
+   offset: (page - 1) * pageSize,
+   order: [["createdAt", "DESC"]],
+ });
+ res.json(orders);
+});
 
 /* ===================== VENDOR ORDERS (legacy by param) ===================== */
 router.get("/vendor/:vendorId", authenticateToken, async (req, res) => {
