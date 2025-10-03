@@ -33,21 +33,29 @@ async function allVendorIdsForUser(userId) {
 }
 
 /* ============== WHO AM I (self-healing) ============== */
-router.get(
-  "/me",
-  authenticateToken,
-  requireVendor,
-  async (req, res) => {
-    try {
-      const v = await getOrCreateVendorForUser(req.user.id);
-      if (!v || v.isDeleted) return res.status(404).json({ message: "Vendor profile not found" });
-      const json = await Vendor.findByPk(v.id, { attributes: SAFE_VENDOR_ATTRS });
-      res.json({ vendorId: json.id, userId: req.user.id, ...json.toJSON() });
-    } catch (e) {
-      res.status(500).json({ message: "Failed to load vendor profile", error: e.message });
-    }
+router.get("/me", authenticateToken, requireVendor, async (req, res) => {
+  try {
+    const v = await getOrCreateVendorForUser(req.user.id);
+    if (!v) return res.status(404).json({ message: "Vendor profile not found" });
+
+    // respond directly with what we already have (no second query)
+    const safe = {
+      id: v.id,
+      UserId: v.UserId,
+      isOpen: v.isOpen,
+      name: v.name || "",
+      location: v.location || "",
+      cuisine: v.cuisine || "",
+      phone: v.phone || null,
+      isDeleted: Boolean(v.isDeleted),
+      createdAt: v.createdAt,
+      updatedAt: v.updatedAt,
+    };
+    res.json({ vendorId: v.id, userId: req.user.id, ...safe });
+  } catch (e) {
+    res.status(500).json({ message: "Failed to load vendor profile", error: e.message });
   }
-);
+});
 
 /* ============== TOGGLE OPEN/CLOSED ============== */
 router.patch(
