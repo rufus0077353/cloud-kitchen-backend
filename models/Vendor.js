@@ -4,6 +4,7 @@ module.exports = (sequelize, DataTypes) => {
     "Vendor",
     {
       name:      { type: DataTypes.STRING, allowNull: false },
+      UserId:    { type: DataTypes.INTEGER, allowNull: false, unique: true },
       location:  { type: DataTypes.STRING, allowNull: true },
       cuisine:   { type: DataTypes.STRING, allowNull: true },
       phone:     { type: DataTypes.STRING, allowNull: true },
