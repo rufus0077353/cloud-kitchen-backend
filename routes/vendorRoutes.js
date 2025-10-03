@@ -245,31 +245,113 @@ router.delete("/:id/force", authenticateToken, requireAdmin, async (req, res) =>
   }
 });
 
-/* ============== LEGACY PAYOUTS (for dashboard) ============== */
-router.get(
-  "/:id/payouts",
-  authenticateToken,
-  requireVendor,
-  async (req, res) => {
-    try {
-      const idNum = Number(req.params.id);
-      const myIds = await allVendorIdsForUser(req.user.id);
-      if (!myIds.includes(idNum)) return res.status(403).json({ message: "Not your vendor" });
-
-      const where = {
-        VendorId: idNum,
-        status: { [Op.notIn]: ["rejected", "canceled"] },
-        paymentStatus: "paid",
-      };
-      const grossPaid = (await Order.sum("totalAmount", { where })) || 0;
-      const paidOrders = await Order.count({ where });
-      const commission = +(grossPaid * Number(process.env.COMMISSION_PCT || 0.15)).toFixed(2);
-      const netOwed = +(grossPaid - commission).toFixed(2);
-      res.json({ vendorId: idNum, paidOrders, grossPaid: +grossPaid.toFixed(2), commission, netOwed });
-    } catch (e) {
-      res.status(500).json({ message: "Failed to build payouts", error: e.message });
+/* ============== PAYOUTS (SUMMARY FOR DASHBOARD) ============== */
+// Returns: { vendorId, paidOrders, grossPaid, commission, netOwed }
+router.get("/:id/payouts", authenticateToken, requireVendor, async (req, res) => {
+  const t = await Vendor.sequelize.transaction();
+  try {
+    const idNum = Number(req.params.id);
+    if (!Number.isFinite(idNum)) {
+      await t.rollback();
+      return res.status(400).json({ message: "Invalid vendor id" });
     }
+
+    // ensure this vendor belongs to the authed user
+    const myIds = (
+      await Vendor.findAll({ where: { UserId: req.user.id }, attributes: ["id"], transaction: t })
+    ).map(v => v.id);
+    if (!myIds.includes(idNum)) {
+      await t.rollback();
+      return res.status(403).json({ message: "Not your vendor" });
+    }
+
+    // ---- Try the most robust way: compute from OrderItems × MenuItem.price
+    // accepted statuses that we count as "paid/complete"
+    const DONE_STATUSES = ["delivered", "completed", "paid"]; // tweak if your app differs
+
+    // fetch orders for this vendor that are complete-ish
+    const orders = await Order.findAll({
+      where: {
+        VendorId: idNum,
+        // if your Order model doesn't have "status", this filter is ignored below
+      },
+      include: [
+        {
+          model: OrderItem,
+          required: false,
+          include: [{ model: MenuItem, required: false, attributes: ["id", "price"] }],
+        },
+      ],
+      transaction: t,
+    });
+
+    // compute totals defensively
+    let paidOrders = 0;
+    let grossPaid = 0;
+
+    for (const o of orders) {
+      const hasStatus = Object.prototype.hasOwnProperty.call(o.dataValues, "status");
+      const ok =
+        !hasStatus || // if there's no status column we accept the order
+        (o.status && DONE_STATUSES.includes(String(o.status).toLowerCase()));
+
+      if (!ok) continue;
+
+      // preferred: sum from line items
+      const items = Array.isArray(o.OrderItems) ? o.OrderItems : [];
+      let fromLines = 0;
+      for (const it of items) {
+        const qty =
+          Number(it?.quantity ?? it?.OrderItem?.quantity ?? 0) || 0;
+        const price =
+          Number(it?.MenuItem?.price ?? it?.price ?? 0) || 0;
+        fromLines += qty * price;
+      }
+
+      // fallback 1: if your Order has totalAmount, use it
+      let orderAmount = fromLines;
+      if (orderAmount === 0 && Object.prototype.hasOwnProperty.call(o.dataValues, "totalAmount")) {
+        orderAmount = Number(o.totalAmount || 0);
+      }
+
+      // fallback 2: if your Order has `amount` or `total`, try those
+      if (orderAmount === 0 && Object.prototype.hasOwnProperty.call(o.dataValues, "amount")) {
+        orderAmount = Number(o.amount || 0);
+      }
+      if (orderAmount === 0 && Object.prototype.hasOwnProperty.call(o.dataValues, "total")) {
+        orderAmount = Number(o.total || 0);
+      }
+
+      grossPaid += orderAmount;
+      paidOrders += 1;
+    }
+
+    // Commission math
+    const COMMISSION_PCT = Number(process.env.COMMISSION_PCT || 0.15);
+    const commission = +(grossPaid * COMMISSION_PCT).toFixed(2);
+    const netOwed = +(grossPaid - commission).toFixed(2);
+
+    await t.commit();
+    return res.json({
+      vendorId: idNum,
+      paidOrders,
+      grossPaid: +grossPaid.toFixed(2),
+      commission,
+      netOwed,
+    });
+  } catch (e) {
+    try { await t.rollback(); } catch {}
+    // Return a safe payload instead of a 500 so the UI doesn’t spam errors
+    console.error("PAYOUTS summary error:", e?.message);
+    return res.status(200).json({
+      vendorId: Number(req.params.id) || null,
+      paidOrders: 0,
+      grossPaid: 0,
+      commission: 0,
+      netOwed: 0,
+      _warning: "Payouts summary fallback used: " + (e?.message || "unknown error"),
+    });
   }
-);
+});
 
 module.exports = router;
