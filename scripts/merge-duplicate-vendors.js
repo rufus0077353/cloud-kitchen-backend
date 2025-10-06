@@ -1,28 +1,35 @@
-// scripts/merge-duplicate-vendors.js
-const { sequelize, Vendor, MenuItem, Order, OrderItem, Payout } = require('../models');
+
+const { Vendor, Order, MenuItem } = require("../models");
 
 (async () => {
-  const t = await sequelize.transaction();
   try {
-    const [rows] = await sequelize.query(
-      `SELECT "UserId" FROM "Vendors" GROUP BY "UserId" HAVING COUNT(*) > 1`,
-      { transaction: t }
-    );
-    for (const { UserId } of rows) {
-      const vendors = await Vendor.findAll({ where: { UserId }, order: [['createdAt','DESC']], transaction: t });
-      const keep = vendors[0], drop = vendors.slice(1);
-      for (const v of drop) {
-        await MenuItem.update({ VendorId: keep.id }, { where: { VendorId: v.id }, transaction: t });
-        await Order.update   ({ VendorId: keep.id }, { where: { VendorId: v.id }, transaction: t });
-        if (Payout) await Payout.update({ VendorId: keep.id }, { where: { VendorId: v.id }, transaction: t });
-        await Vendor.destroy({ where: { id: v.id }, transaction: t });
+    const vendors = await Vendor.findAll({
+      attributes: ["UserId"],
+      group: ["UserId"],
+      having: Vendor.sequelize.literal("COUNT(*) > 1"),
+    });
+
+    for (const v of vendors) {
+      const userId = v.UserId;
+      const dups = await Vendor.findAll({ where: { UserId: userId } });
+      if (dups.length < 2) continue;
+
+      // Keep the first one, merge orders/items into it
+      const keeper = dups[0];
+      const extras = dups.slice(1);
+
+      for (const ex of extras) {
+        await Order.update({ VendorId: keeper.id }, { where: { VendorId: ex.id } });
+        await MenuItem.update({ VendorId: keeper.id }, { where: { VendorId: ex.id } });
+        await ex.destroy();
       }
-      console.log(`User ${UserId}: kept ${keep.id}, removed ${drop.length}`);
+
+      console.log(`✅ Merged ${dups.length} vendors for user ${userId} -> kept Vendor ${keeper.id}`);
     }
-    await t.commit();
-    console.log('✅ Vendor merge complete');
+
     process.exit(0);
-  } catch (e) {
-    await t.rollback(); console.error('❌ Merge failed:', e); process.exit(1);
+  } catch (err) {
+    console.error("❌ Error cleaning vendors:", err);
+    process.exit(1);
   }
 })();

@@ -1,39 +1,41 @@
-// config/config.js
 require("dotenv").config();
 
-const common = {
-  dialect: "postgres",              // 👈 REQUIRED
+const base = {
+  dialect: "postgres",
   dialectModule: require("pg"),
-  dialectOptions: {
-    ssl: {
-      require: true,
-      rejectUnauthorized: false,
-    },
-  },
   logging: false,
 };
 
 module.exports = {
   development: {
-    ...common,
+    ...base,
     username: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
     host: process.env.DB_HOST,
     port: process.env.DB_PORT || 5432,
+    // ❌ don't force SSL locally
+    dialectOptions: {},
   },
 
   test: {
-    ...common,
+    ...base,
     username: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
     host: process.env.DB_HOST,
     port: process.env.DB_PORT || 5432,
+    dialectOptions: {},
   },
 
   production: {
-    ...common,
+    ...base,
     use_env_variable: "DATABASE_URL",
+    dialectOptions: {
+      ssl: {
+        require: true,
+        rejectUnauthorized: false,
+      },
+    },
   },
 };
