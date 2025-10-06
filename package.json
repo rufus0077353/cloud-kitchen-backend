@@ -5,7 +5,12 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node index.js"
+    "start": "node index.js",
+
+    "backup": "node scripts/backup-db.js",
+    "migrate-vendors": "node scripts/merge-duplicate-vendors.js",
+    "migrate": "sequelize db:migrate"
+
   },
   "keywords": [],
   "author": "",
