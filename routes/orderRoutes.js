@@ -940,99 +940,84 @@ router.get("/:id/invoice.pdf", authenticateToken, async (req, res) => {
  }
 });
 
-/* ===================== PAYOUTS SUMMARY (VENDOR) ===================== */
-router.get(
- "/payouts/summary",
- authenticateToken,
- requireVendor,
- ensureVendorProfile,
- async (req, res) => {
-   try {
-     const vendorIds = await buildVendorScope(req);
-     const { from, to } = req.query;
 
-     // Only use valid enum in status filter
-     const whereOrder = {
-       VendorId: { [Op.in]: vendorIds },
-       status: { [Op.notIn]: ["rejected"] },
-     };
-     if (from || to) {
-       whereOrder.createdAt = {};
-       if (from) whereOrder.createdAt[Op.gte] = new Date(from);
-       if (to)   whereOrder.createdAt[Op.lte] = new Date(to);
-     }
+// ---- Payout Summary Endpoints ----
+// 🔹 Vendor summary (single vendor)
+router.get("/payouts/summary", authenticateToken, async (req, res) => {
+  try {
+    const user = req.user;
+    if (user.role !== "vendor") return res.status(403).json({ message: "Forbidden" });
 
-     const grossPaid = await Order.sum("totalAmount", { where: { ...whereOrder, paymentStatus: "paid" } }) || 0;
-     const paidOrders = await Order.count({ where: { ...whereOrder, paymentStatus: "paid" } });
-     const unpaidGross = await Order.sum("totalAmount", { where: { ...whereOrder, paymentStatus: { [Op.ne]: "paid" } } }) || 0;
+    const vendor = await Vendor.findOne({ where: { userId: user.id } });
+    if (!vendor) return res.status(404).json({ message: "Vendor not found" });
 
-     const commission = +(grossPaid * COMMISSION_PCT).toFixed(2);
-     const netOwed    = +(grossPaid - commission).toFixed(2);
+    const from = req.query.from ? new Date(req.query.from) : null;
+    const to = req.query.to ? new Date(req.query.to) : null;
 
-     return res.json({
-       vendorIdsUsed: vendorIds,
-       dateRange: { from: from || null, to: to || null },
-       rate: COMMISSION_PCT,
-       paidOrders,
-       grossPaid: +grossPaid.toFixed(2),
-       commission,
-       netOwed,
-       grossUnpaid: +unpaidGross.toFixed(2),
-     });
-   } catch (err) {
-     return res.status(500).json({ message: "Failed to build payouts summary", error: err.message });
-   }
- }
-);
+    const where = { vendorId: vendor.id, paymentStatus: "paid" };
+    if (from || to) where.createdAt = {};
+    if (from) where.createdAt[Op.gte] = from;
+    if (to) where.createdAt[Op.lte] = to;
 
-/* ===================== PAYOUTS SUMMARY (ADMIN) ===================== */
+    const orders = await Order.findAll({ where });
+    const grossPaid = orders.reduce((sum, o) => sum + (o.totalAmount || 0), 0);
+    const commissionRate = vendor.commissionRate || 0.15;
+    const commission = grossPaid * commissionRate;
+    const netOwed = grossPaid - commission;
+
+    res.json({
+      vendorId: vendor.id,
+      paidOrders: orders.length,
+      grossPaid,
+      commission,
+      netOwed,
+      rate: commissionRate,
+    });
+  } catch (err) {
+    console.error("Vendor payout summary error:", err);
+    res.status(500).json({ message: "Failed to compute vendor payout summary" });
+  }
+});
+
+// 🔹 Admin summary (all vendors)
 router.get("/payouts/summary/all", authenticateToken, async (req, res) => {
- try {
-   if (req.user?.role !== "admin") return res.status(403).json({ message: "Admin only" });
-   const { from, to } = req.query;
+  try {
+    const user = req.user;
+    if (user.role !== "admin") return res.status(403).json({ message: "Forbidden" });
 
-   const where = {
-     status: { [Op.notIn]: ["rejected"] },
-     paymentStatus: "paid",
-   };
-   if (from || to) {
-     where.createdAt = {};
-     if (from) where.createdAt[Op.gte] = new Date(from);
-     if (to)   where.createdAt[Op.lte] = new Date(to);
-   }
+    const vendors = await Vendor.findAll();
+    const from = req.query.from ? new Date(req.query.from) : null;
+    const to = req.query.to ? new Date(req.query.to) : null;
 
-   const rows = await Order.findAll({
-     attributes: [
-       "VendorId",
-       [sequelize.fn("COUNT", sequelize.col("Order.id")), "paidOrders"],
-       [sequelize.fn("SUM", sequelize.col("totalAmount")), "grossPaid"],
-     ],
-     where,
-     include: [{ model: Vendor, attributes: ["id", "name"] }],
-     group: ["VendorId", "Vendor.id"],
-     order: [[sequelize.fn("SUM", sequelize.col("totalAmount")), "DESC"]],
-   });
+    const results = [];
 
-   const out = rows.map(r => {
-     const grossPaid = Number(r.get("grossPaid") || 0);
-     const paidOrders = Number(r.get("paidOrders") || 0);
-     const commission = +(grossPaid * COMMISSION_PCT).toFixed(2);
-     const netOwed = +(grossPaid - commission).toFixed(2);
-     return {
-       vendorId: r.VendorId,
-       vendorName: r.Vendor?.name || "-",
-       paidOrders,
-       grossPaid: +grossPaid.toFixed(2),
-       commission,
-       netOwed,
-       rate: COMMISSION_PCT,
-     };
-   });
+    for (const v of vendors) {
+      const where = { vendorId: v.id, paymentStatus: "paid" };
+      if (from || to) where.createdAt = {};
+      if (from) where.createdAt[Op.gte] = from;
+      if (to) where.createdAt[Op.lte] = to;
 
-   return res.json(out);
- } catch (err) {
-   return res.status(500).json({ message: "Failed to build admin payouts", error: err.message });
- }
+      const orders = await Order.findAll({ where });
+      const grossPaid = orders.reduce((sum, o) => sum + (o.totalAmount || 0), 0);
+      const rate = v.commissionRate || 0.15;
+      const commission = grossPaid * rate;
+      const netOwed = grossPaid - commission;
+
+      results.push({
+        vendorId: v.id,
+        vendorName: v.name,
+        paidOrders: orders.length,
+        grossPaid,
+        commission,
+        netOwed,
+      });
+    }
+
+    res.json(results);
+  } catch (err) {
+    console.error("Admin payout summary error:", err);
+    res.status(500).json({ message: "Failed to compute admin payout summary" });
+  }
 });
 
 /* ===================== DEBUG: SCAN VENDORS ===================== */
