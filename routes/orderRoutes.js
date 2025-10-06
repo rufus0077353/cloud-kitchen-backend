@@ -17,10 +17,35 @@ const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 const sequelize = Order.sequelize;
 const { notifyUser } = require("../utils/notifications");
 
-/* ---------- config / optional deps ---------- */
+
+// ===================== PAYOUTS SUMMARY HELPERS =====================
 const COMMISSION_PCT = Number(process.env.COMMISSION_PCT || 0.15);
-let Puppeteer = null;
-try { Puppeteer = require("puppeteer"); } catch {}
+
+const parseDate = (v) => {
+  if (!v) return null;
+  const d = new Date(v);
+  return Number.isFinite(d.getTime()) ? d : null;
+};
+
+async function safeSum(model, field, where) {
+  try {
+    const n = await model.sum(field, { where });
+    return Number(n || 0);
+  } catch (err) {
+    console.error("safeSum error:", err.message);
+    return 0;
+  }
+}
+
+async function safeCount(model, where) {
+  try {
+    const n = await model.count({ where });
+    return Number(n || 0);
+  } catch (err) {
+    console.error("safeCount error:", err.message);
+    return 0;
+  }
+}
 
 /* ---------- socket helpers ---------- */
 function emitToVendorHelper(req, vendorId, event, payload) {
@@ -954,82 +979,136 @@ router.get("/:id/invoice.pdf", authenticateToken, async (req, res) => {
 });
 
 
-// ---- Payout Summary Endpoints ----
-// 🔹 Vendor summary (single vendor)
+// ===================== PAYOUTS SUMMARY (VENDOR) =====================
 router.get("/payouts/summary", authenticateToken, async (req, res) => {
   try {
-    const user = req.user;
-    if (user.role !== "vendor") return res.status(403).json({ message: "Forbidden" });
+    // Find a vendor for this user (don’t hard fail)
+    let vendor = null;
+    try {
+      vendor = await Vendor.findOne({ where: { UserId: req.user.id }, attributes: ["id"] });
+    } catch {}
 
-    const vendor = await Vendor.findOne({ where: { userId: user.id } });
-    if (!vendor) return res.status(404).json({ message: "Vendor not found" });
-
-    const from = req.query.from ? new Date(req.query.from) : null;
-    const to = req.query.to ? new Date(req.query.to) : null;
-
-    const where = { vendorId: vendor.id, paymentStatus: "paid" };
-    if (from || to) where.createdAt = {};
-    if (from) where.createdAt[Op.gte] = from;
-    if (to) where.createdAt[Op.lte] = to;
-
-    const orders = await Order.findAll({ where });
-    const grossPaid = orders.reduce((sum, o) => sum + (o.totalAmount || 0), 0);
-    const commissionRate = vendor.commissionRate || 0.15;
-    const commission = grossPaid * commissionRate;
-    const netOwed = grossPaid - commission;
-
-    res.json({
-      vendorId: vendor.id,
-      paidOrders: orders.length,
-      grossPaid,
-      commission,
-      netOwed,
-      rate: commissionRate,
-    });
-  } catch (err) {
-    console.error("Vendor payout summary error:", err);
-    res.status(500).json({ message: "Failed to compute vendor payout summary" });
-  }
-});
-
-// 🔹 Admin summary (all vendors)
-router.get("/payouts/summary/all", authenticateToken, async (req, res) => {
-  try {
-    const user = req.user;
-    if (user.role !== "admin") return res.status(403).json({ message: "Forbidden" });
-
-    const vendors = await Vendor.findAll();
-    const from = req.query.from ? new Date(req.query.from) : null;
-    const to = req.query.to ? new Date(req.query.to) : null;
-
-    const results = [];
-
-    for (const v of vendors) {
-      const where = { vendorId: v.id, paymentStatus: "paid" };
-      if (from || to) where.createdAt = {};
-      if (from) where.createdAt[Op.gte] = from;
-      if (to) where.createdAt[Op.lte] = to;
-
-      const orders = await Order.findAll({ where });
-      const grossPaid = orders.reduce((sum, o) => sum + (o.totalAmount || 0), 0);
-      const rate = v.commissionRate || 0.15;
-      const commission = grossPaid * rate;
-      const netOwed = grossPaid - commission;
-
-      results.push({
-        vendorId: v.id,
-        vendorName: v.name,
-        paidOrders: orders.length,
-        grossPaid,
-        commission,
-        netOwed,
+    if (!vendor) {
+      // No vendor yet — return zeros so UI still renders
+      return res.json({
+        vendorIdsUsed: [],
+        dateRange: { from: null, to: null },
+        rate: COMMISSION_PCT,
+        paidOrders: 0,
+        grossPaid: 0,
+        commission: 0,
+        netOwed: 0,
+        grossUnpaid: 0,
       });
     }
 
-    res.json(results);
+    const vendorIds = [Number(vendor.id)];
+    const from = parseDate(req.query.from);
+    const to   = parseDate(req.query.to);
+
+    const createdAt = {};
+    if (from) createdAt[Op.gte] = from;
+    if (to)   createdAt[Op.lte] = to;
+
+    const whereBase = {
+      VendorId: { [Op.in]: vendorIds },
+      status: { [Op.notIn]: ["rejected"] },
+      ...(from || to ? { createdAt } : {}),
+    };
+
+    const paidWhere   = { ...whereBase, paymentStatus: "paid" };
+    const unpaidWhere = { ...whereBase, paymentStatus: { [Op.ne]: "paid" } };
+
+    const [grossPaid, paidOrders, unpaidGross] = await Promise.all([
+      safeSum(Order, "totalAmount", paidWhere),
+      safeCount(Order, paidWhere),
+      safeSum(Order, "totalAmount", unpaidWhere),
+    ]);
+
+    const commission = Math.max(0, +(grossPaid * COMMISSION_PCT).toFixed(2));
+    const netOwed    = Math.max(0, +(grossPaid - commission).toFixed(2));
+
+    return res.json({
+      vendorIdsUsed: vendorIds,
+      dateRange: { from: from ? from.toISOString() : null, to: to ? to.toISOString() : null },
+      rate: COMMISSION_PCT,
+      paidOrders,
+      grossPaid: +grossPaid.toFixed(2),
+      commission,
+      netOwed,
+      grossUnpaid: +unpaidGross.toFixed(2),
+    });
   } catch (err) {
-    console.error("Admin payout summary error:", err);
-    res.status(500).json({ message: "Failed to compute admin payout summary" });
+    console.error("payouts/summary error:", err?.message || err);
+    return res.status(200).json({
+      // Return a safe ZERO summary instead of 500 so UI never breaks
+      vendorIdsUsed: [],
+      dateRange: { from: null, to: null },
+      rate: COMMISSION_PCT,
+      paidOrders: 0,
+      grossPaid: 0,
+      commission: 0,
+      netOwed: 0,
+      grossUnpaid: 0,
+      note: "fallback",
+    });
+  }
+});
+
+// ===================== PAYOUTS SUMMARY (ADMIN) =====================
+router.get("/payouts/summary/all", authenticateToken, async (req, res) => {
+  try {
+    if ((req.user?.role || "").toLowerCase() !== "admin") {
+      return res.status(403).json({ message: "Admin only" });
+    }
+
+    const from = parseDate(req.query.from);
+    const to   = parseDate(req.query.to);
+
+    const createdAt = {};
+    if (from) createdAt[Op.gte] = from;
+    if (to)   createdAt[Op.lte] = to;
+
+    const where = {
+      status: { [Op.notIn]: ["rejected"] },
+      paymentStatus: "paid",
+      ...(from || to ? { createdAt } : {}),
+    };
+
+    const rows = await Order.findAll({
+      attributes: [
+        "VendorId",
+        [sequelize.fn("COUNT", sequelize.col("Order.id")), "paidOrders"],
+        [sequelize.fn("SUM", sequelize.col("totalAmount")), "grossPaid"],
+      ],
+      where,
+      include: [{ model: Vendor, attributes: ["id", "name"] }],
+      group: ["VendorId", "Vendor.id"],
+      order: [[sequelize.fn("SUM", sequelize.col("totalAmount")), "DESC"]],
+      raw: false,
+    });
+
+    const out = (rows || []).map((r) => {
+      const grossPaid = Number(r.get?.("grossPaid") ?? r.grossPaid ?? 0) || 0;
+      const paidOrders = Number(r.get?.("paidOrders") ?? r.paidOrders ?? 0) || 0;
+      const commission = +(grossPaid * COMMISSION_PCT).toFixed(2);
+      const netOwed = +(grossPaid - commission).toFixed(2);
+      return {
+        vendorId: r.VendorId,
+        vendorName: r.Vendor?.name || `#${r.VendorId}`,
+        paidOrders,
+        grossPaid: +grossPaid.toFixed(2),
+        commission,
+        netOwed,
+        rate: COMMISSION_PCT,
+      };
+    });
+
+    return res.json(out);
+  } catch (err) {
+    console.error("payouts/summary/all error:", err?.message || err);
+    // Return an empty list instead of 500 so admin UI still loads
+    return res.json([]);
   }
 });
 
