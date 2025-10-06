@@ -178,33 +178,40 @@ router.get("/my", authenticateToken, async (req, res) => {
  }
 });
 
-/* ---------------------------------------------------------------
-   GET /api/orders/vendor/summary
-   Used by VendorDashboard: revenue/orders (today, week, month, totals) + byStatus
------------------------------------------------------------------*/
+
+// ---------------------------------------------------------------
+// GET /api/orders/vendor/summary
+// Returns {today, week, month, totals, byStatus} for the logged-in vendor
+// ---------------------------------------------------------------
 router.get(
   "/vendor/summary",
   authenticateToken,
   requireVendor,
   async (req, res) => {
     try {
+      // Always resolve to a real vendor (creates a minimal row if missing)
       const v = await getOrCreateVendorForUser(req.user.id);
       if (!v) return res.status(404).json({ message: "Vendor profile not found" });
 
       const vendorId = v.id;
 
-      const startOfToday = new Date(); startOfToday.setHours(0,0,0,0);
-      const sevenDaysAgo = new Date(); sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-      const startOfMonth = new Date(); startOfMonth.setDate(1); startOfMonth.setHours(0,0,0,0);
+      // date helpers
+      const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+      const sevenDaysAgo  = new Date(); sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+      const startOfMonth  = new Date(); startOfMonth.setDate(1); startOfMonth.setHours(0, 0, 0, 0);
 
-      const sum = (field, where) => Order.sum(field, { where }).then(n => Number(n || 0));
-      const count = (where) => Order.count({ where });
+      // tiny helpers
+      const sum   = (field, where) => Order.sum(field, { where }).then(n => Number(n || 0));
+      const count = (where)         => Order.count({ where });
 
-      const [todayOrders, todayRevenue,
-             weekOrders, weekRevenue,
-             monthOrders, monthRevenue,
-             totalOrders, totalRevenue,
-             byStatusRaw] = await Promise.all([
+      // compute blocks (no GROUP BY)
+      const [
+        todayOrders,  todayRevenue,
+        weekOrders,   weekRevenue,
+        monthOrders,  monthRevenue,
+        totalOrders,  totalRevenue,
+        pendingCnt,   acceptedCnt, readyCnt, deliveredCnt, rejectedCnt, unknownCnt,
+      ] = await Promise.all([
         count({ VendorId: vendorId, createdAt: { [Op.gte]: startOfToday } }),
         sum("totalAmount", { VendorId: vendorId, createdAt: { [Op.gte]: startOfToday } }),
 
@@ -217,28 +224,34 @@ router.get(
         count({ VendorId: vendorId }),
         sum("totalAmount", { VendorId: vendorId }),
 
-        // group by status in a dialect-agnostic way
-        Order.findAll({
-          attributes: ["status", [sequelize.fn("COUNT", sequelize.col("id")), "cnt"]],
-          where: { VendorId: vendorId },
-          group: ["status"],
-          raw: true,
-        }),
+        // byStatus (explicit counts, safe across dialects + nulls)
+        count({ VendorId: vendorId, status: "pending"   }),
+        count({ VendorId: vendorId, status: "accepted"  }),
+        count({ VendorId: vendorId, status: "ready"     }),
+        count({ VendorId: vendorId, status: "delivered" }),
+        count({ VendorId: vendorId, status: "rejected"  }),
+        count({ VendorId: vendorId, status: null        }),
       ]);
 
-      const byStatus = {};
-      for (const r of byStatusRaw) byStatus[r.status || "unknown"] = Number(r.cnt || 0);
+      const byStatus = {
+        pending:   pendingCnt,
+        accepted:  acceptedCnt,
+        ready:     readyCnt,
+        delivered: deliveredCnt,
+        rejected:  rejectedCnt,
+        unknown:   unknownCnt,
+      };
 
-      res.json({
-        today: { orders: todayOrders, revenue: todayRevenue },
-        week:  { orders: weekOrders,  revenue: weekRevenue  },
-        month: { orders: monthOrders, revenue: monthRevenue },
-        totals:{ orders: totalOrders, revenue: totalRevenue },
+      return res.json({
+        today:  { orders: todayOrders,  revenue: todayRevenue  },
+        week:   { orders: weekOrders,   revenue: weekRevenue   },
+        month:  { orders: monthOrders,  revenue: monthRevenue  },
+        totals: { orders: totalOrders,  revenue: totalRevenue  },
         byStatus,
       });
     } catch (e) {
-      console.error("summary error:", e);
-      res.status(500).json({ message: "Failed to build summary" });
+      console.error("vendor summary error:", e?.message || e);
+      return res.status(500).json({ message: "Failed to build summary" });
     }
   }
 );
