@@ -1044,64 +1044,48 @@ router.get("/payouts/summary", authenticateToken, async (req, res) => {
   }
 });
 
-// ===================== PAYOUTS SUMMARY (ADMIN) =====================
+// ✅ Admin payout summary route
 router.get("/payouts/summary/all", authenticateToken, async (req, res) => {
   try {
-    // 🔐 Admin only (be forgiving about casing)
-    const role = String(req.user?.role || "").toLowerCase();
+    const role = (req.user?.role || "").toLowerCase();
     if (role !== "admin") {
       return res.status(403).json({ message: "Admin only" });
     }
 
-    // 📅 Optional date range
     const from = parseDate(req.query.from);
-    const to   = parseDate(req.query.to);
+    const to = parseDate(req.query.to);
 
     const createdAt = {};
     if (from) createdAt[Op.gte] = from;
-    if (to)   createdAt[Op.lte] = new Date(new Date(to).setHours(23, 59, 59, 999)); // inclusive end
+    if (to) createdAt[Op.lte] = to;
 
-    // Only consider paid, non-rejected orders in the window
     const where = {
       status: { [Op.notIn]: ["rejected"] },
-      paymentStatus: "paid", // adjust if your backend uses "success" etc.
+      paymentStatus: "paid",
       ...(from || to ? { createdAt } : {}),
     };
 
     const rows = await Order.findAll({
       attributes: [
         "VendorId",
-        [fn("COUNT", col("Order.id")), "paidOrders"],
-        [fn("SUM", col("totalAmount")), "grossPaid"],
+        [sequelize.fn("COUNT", sequelize.col("Order.id")), "paidOrders"],
+        [sequelize.fn("SUM", sequelize.col("totalAmount")), "grossPaid"],
       ],
       where,
-      include: [
-        {
-          model: Vendor,
-          attributes: ["id", "name"],
-          required: true, // vendor should exist for each order
-        },
-      ],
-      group: ["VendorId", "Vendor.id", "Vendor.name"],
-      order: [[literal("grossPaid"), "DESC"]],
-      raw: false,
+      include: [{ model: Vendor, attributes: ["id", "name"] }],
+      group: ["VendorId", "Vendor.id"],
+      order: [[sequelize.fn("SUM", sequelize.col("totalAmount")), "DESC"]],
     });
 
-    // Normalize Sequelize instances or plain objects
     const out = (rows || []).map((r) => {
-      const get = typeof r.get === "function" ? r.get.bind(r) : (k) => r[k];
-      const grossPaidRaw = get("grossPaid");
-      const paidOrdersRaw = get("paidOrders");
-
-      const grossPaid = Number(grossPaidRaw || 0);
-      const paidOrders = Number(paidOrdersRaw || 0);
+      const grossPaid = Number(r.get("grossPaid")) || 0;
+      const paidOrders = Number(r.get("paidOrders")) || 0;
       const commission = +(grossPaid * COMMISSION_PCT).toFixed(2);
       const netOwed = +(grossPaid - commission).toFixed(2);
 
-      const vendorObj = r.Vendor || {};
       return {
         vendorId: r.VendorId,
-        vendorName: vendorObj.name || `#${r.VendorId}`,
+        vendorName: r.Vendor?.name || `#${r.VendorId}`,
         paidOrders,
         grossPaid: +grossPaid.toFixed(2),
         commission,
@@ -1112,9 +1096,8 @@ router.get("/payouts/summary/all", authenticateToken, async (req, res) => {
 
     return res.json(out);
   } catch (err) {
-    console.error("payouts/summary/all error:", err?.stack || err);
-    // Return an empty list (keeps the admin page rendering)
-    return res.json([]);
+    console.error("❌ payouts/summary/all error:", err);
+    return res.status(500).json({ message: "Internal server error" });
   }
 });
 
