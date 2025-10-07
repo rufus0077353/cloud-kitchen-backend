@@ -979,123 +979,129 @@ router.get("/:id/invoice.pdf", authenticateToken, async (req, res) => {
 });
 
 
-// ===================== PAYOUTS SUMMARY (VENDOR) =====================
+// /orders/payouts/summary  → for VENDOR dashboards
 router.get("/payouts/summary", authenticateToken, async (req, res) => {
   try {
-    // Find a vendor for this user (don’t hard fail)
-    let vendor = null;
-    try {
-      vendor = await Vendor.findOne({ where: { UserId: req.user.id }, attributes: ["id"] });
-    } catch {}
-
-    if (!vendor) {
-      // No vendor yet — return zeros so UI still renders
-      return res.json({
-        vendorIdsUsed: [],
-        dateRange: { from: null, to: null },
-        rate: COMMISSION_PCT,
-        paidOrders: 0,
-        grossPaid: 0,
-        commission: 0,
-        netOwed: 0,
-        grossUnpaid: 0,
-      });
+    const role = String(req.user?.role || "").toLowerCase();
+    if (role !== "vendor") {
+      return res.status(403).json({ message: "Vendor only" });
     }
 
-    const vendorIds = [Number(vendor.id)];
+    // Identify vendor (from token or query)
+    const VendorId = req.user?.VendorId || req.user?.id || null;
+    if (!VendorId) {
+      return res.status(400).json({ message: "Missing VendorId" });
+    }
+
+    // optional date filters
+    const parseDate = (d) => {
+      if (!d) return null;
+      const t = d.trim?.();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return new Date(`${t}T00:00:00`);
+      const m = /^(\d{2})-(\d{2})-(\d{4})$/.exec(t);
+      if (m) return new Date(`${m[3]}-${m[2]}-${m[1]}T00:00:00`);
+      return null;
+    };
+
     const from = parseDate(req.query.from);
     const to   = parseDate(req.query.to);
-
     const createdAt = {};
     if (from) createdAt[Op.gte] = from;
-    if (to)   createdAt[Op.lte] = to;
+    if (to)   createdAt[Op.lte] = new Date(new Date(to).setHours(23, 59, 59, 999));
 
-    const whereBase = {
-      VendorId: { [Op.in]: vendorIds },
+    const where = {
+      VendorId,
       status: { [Op.notIn]: ["rejected"] },
+      paymentStatus: "paid",
       ...(from || to ? { createdAt } : {}),
     };
 
-    const paidWhere   = { ...whereBase, paymentStatus: "paid" };
-    const unpaidWhere = { ...whereBase, paymentStatus: { [Op.ne]: "paid" } };
+    const paidOrders = await Order.count({ where });
+    const grossPaid  = await Order.sum("totalAmount", { where }) || 0;
 
-    const [grossPaid, paidOrders, unpaidGross] = await Promise.all([
-      safeSum(Order, "totalAmount", paidWhere),
-      safeCount(Order, paidWhere),
-      safeSum(Order, "totalAmount", unpaidWhere),
-    ]);
+    const commission = +(grossPaid * COMMISSION_PCT).toFixed(2);
+    const netOwed    = +(grossPaid - commission).toFixed(2);
 
-    const commission = Math.max(0, +(grossPaid * COMMISSION_PCT).toFixed(2));
-    const netOwed    = Math.max(0, +(grossPaid - commission).toFixed(2));
+    const unpaidWhere = {
+      VendorId,
+      status: { [Op.notIn]: ["rejected"] },
+      paymentStatus: { [Op.ne]: "paid" },
+    };
+    const grossUnpaid = (await Order.sum("totalAmount", { where: unpaidWhere })) || 0;
 
     return res.json({
-      vendorIdsUsed: vendorIds,
-      dateRange: { from: from ? from.toISOString() : null, to: to ? to.toISOString() : null },
-      rate: COMMISSION_PCT,
+      VendorId,
       paidOrders,
       grossPaid: +grossPaid.toFixed(2),
       commission,
       netOwed,
-      grossUnpaid: +unpaidGross.toFixed(2),
+      grossUnpaid: +grossUnpaid.toFixed(2),
+      rate: COMMISSION_PCT,
     });
   } catch (err) {
-    console.error("payouts/summary error:", err?.message || err);
-    return res.status(200).json({
-      // Return a safe ZERO summary instead of 500 so UI never breaks
-      vendorIdsUsed: [],
-      dateRange: { from: null, to: null },
-      rate: COMMISSION_PCT,
-      paidOrders: 0,
-      grossPaid: 0,
-      commission: 0,
-      netOwed: 0,
-      grossUnpaid: 0,
-      note: "fallback",
-    });
+    console.error("payouts/summary (vendor) error:", err?.stack || err);
+    return res.json(null);
   }
 });
 
 // ===================== PAYOUTS SUMMARY (ADMIN) =====================
 router.get("/payouts/summary/all", authenticateToken, async (req, res) => {
   try {
-    if ((req.user?.role || "").toLowerCase() !== "admin") {
+    // 🔐 Admin only (be forgiving about casing)
+    const role = String(req.user?.role || "").toLowerCase();
+    if (role !== "admin") {
       return res.status(403).json({ message: "Admin only" });
     }
 
+    // 📅 Optional date range
     const from = parseDate(req.query.from);
     const to   = parseDate(req.query.to);
 
     const createdAt = {};
     if (from) createdAt[Op.gte] = from;
-    if (to)   createdAt[Op.lte] = to;
+    if (to)   createdAt[Op.lte] = new Date(new Date(to).setHours(23, 59, 59, 999)); // inclusive end
 
+    // Only consider paid, non-rejected orders in the window
     const where = {
       status: { [Op.notIn]: ["rejected"] },
-      paymentStatus: "paid",
+      paymentStatus: "paid", // adjust if your backend uses "success" etc.
       ...(from || to ? { createdAt } : {}),
     };
 
     const rows = await Order.findAll({
       attributes: [
         "VendorId",
-        [sequelize.fn("COUNT", sequelize.col("Order.id")), "paidOrders"],
-        [sequelize.fn("SUM", sequelize.col("totalAmount")), "grossPaid"],
+        [fn("COUNT", col("Order.id")), "paidOrders"],
+        [fn("SUM", col("totalAmount")), "grossPaid"],
       ],
       where,
-      include: [{ model: Vendor, attributes: ["id", "name"] }],
-      group: ["VendorId", "Vendor.id"],
-      order: [[sequelize.fn("SUM", sequelize.col("totalAmount")), "DESC"]],
+      include: [
+        {
+          model: Vendor,
+          attributes: ["id", "name"],
+          required: true, // vendor should exist for each order
+        },
+      ],
+      group: ["VendorId", "Vendor.id", "Vendor.name"],
+      order: [[literal("grossPaid"), "DESC"]],
       raw: false,
     });
 
+    // Normalize Sequelize instances or plain objects
     const out = (rows || []).map((r) => {
-      const grossPaid = Number(r.get?.("grossPaid") ?? r.grossPaid ?? 0) || 0;
-      const paidOrders = Number(r.get?.("paidOrders") ?? r.paidOrders ?? 0) || 0;
+      const get = typeof r.get === "function" ? r.get.bind(r) : (k) => r[k];
+      const grossPaidRaw = get("grossPaid");
+      const paidOrdersRaw = get("paidOrders");
+
+      const grossPaid = Number(grossPaidRaw || 0);
+      const paidOrders = Number(paidOrdersRaw || 0);
       const commission = +(grossPaid * COMMISSION_PCT).toFixed(2);
       const netOwed = +(grossPaid - commission).toFixed(2);
+
+      const vendorObj = r.Vendor || {};
       return {
         vendorId: r.VendorId,
-        vendorName: r.Vendor?.name || `#${r.VendorId}`,
+        vendorName: vendorObj.name || `#${r.VendorId}`,
         paidOrders,
         grossPaid: +grossPaid.toFixed(2),
         commission,
@@ -1106,8 +1112,8 @@ router.get("/payouts/summary/all", authenticateToken, async (req, res) => {
 
     return res.json(out);
   } catch (err) {
-    console.error("payouts/summary/all error:", err?.message || err);
-    // Return an empty list instead of 500 so admin UI still loads
+    console.error("payouts/summary/all error:", err?.stack || err);
+    // Return an empty list (keeps the admin page rendering)
     return res.json([]);
   }
 });
