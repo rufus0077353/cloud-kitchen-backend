@@ -1,26 +1,71 @@
+// models/vendor.js
+"use strict";
 
 module.exports = (sequelize, DataTypes) => {
   const Vendor = sequelize.define(
     "Vendor",
     {
-      name:      { type: DataTypes.STRING, allowNull: false },
-      UserId:    { type: DataTypes.INTEGER, allowNull: false, unique: true },
-      location:  { type: DataTypes.STRING, allowNull: true },
-      cuisine:   { type: DataTypes.STRING, allowNull: true },
-      phone:     { type: DataTypes.STRING, allowNull: true },
-      logoUrl:   { type: DataTypes.STRING(1024), allowNull: true }, // allow /uploads and http(s)
-      isOpen:    { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
-      isDeleted: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
-      commissionRate: { type: DataTypes.FLOAT, allowNull: false, defaultValue: 0.15 },
+      id: {
+        type: DataTypes.INTEGER,
+        primaryKey: true,
+        autoIncrement: true,
+      },
+      name: {
+        type: DataTypes.STRING,
+        allowNull: false,
+      },
+      commissionRate: {
+        type: DataTypes.DOUBLE,
+        allowNull: true,
+        defaultValue: 0.15,
+      },
+      location: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
+      cuisine: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
+      phone: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
+      UserId: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        references: {
+          model: "Users",
+          key: "id",
+        },
+        onDelete: "CASCADE",
+      },
+      createdAt: {
+        allowNull: false,
+        type: DataTypes.DATE,
+        defaultValue: sequelize.fn("NOW"),
+      },
+      updatedAt: {
+        allowNull: false,
+        type: DataTypes.DATE,
+        defaultValue: sequelize.fn("NOW"),
+      },
     },
-    { tableName: "Vendors", timestamps: true }
+    {
+      tableName: "Vendors", // important: capital V
+      timestamps: true,
+    }
   );
 
   Vendor.associate = (models) => {
-    Vendor.belongsTo(models.User,  { foreignKey: "UserId", onDelete: "CASCADE" });
-    Vendor.hasMany(models.MenuItem, { foreignKey: "VendorId" });
-    Vendor.hasMany(models.Order,    { foreignKey: "VendorId" });
-    Vendor.hasMany(models.Payout,   { foreignKey: "VendorId" });
+    Vendor.belongsTo(models.User, { foreignKey: "UserId" });
+
+    if (models.MenuItem) {
+      Vendor.hasMany(models.MenuItem, { foreignKey: "VendorId" });
+    }
+    if (models.Order) {
+      Vendor.hasMany(models.Order, { foreignKey: "VendorId" });
+    }
   };
 
   return Vendor;

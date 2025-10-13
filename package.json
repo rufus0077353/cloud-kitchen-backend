@@ -6,11 +6,10 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node index.js",
-
+    "dev": "nodemon index.js",
     "backup": "node scripts/backup-db.js",
     "migrate-vendors": "node scripts/merge-duplicate-vendors.js",
     "migrate": "sequelize db:migrate"
-
   },
   "keywords": [],
   "author": "",
@@ -50,6 +49,7 @@
   },
   "homepage": "https://github.com/rufus0077353/cloud-kitchen-backend#readme",
   "devDependencies": {
+    "nodemon": "^3.1.10",
     "sequelize-cli": "^6.6.3"
   }
 }

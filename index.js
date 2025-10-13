@@ -1,3 +1,5 @@
+
+// index.js
 require("dotenv").config();
 
 const express = require("express");
@@ -9,16 +11,15 @@ const rateLimit = require("express-rate-limit");
 const compression = require("compression");
 const morgan = require("morgan");
 const path = require("path");
+const bcrypt = require("bcryptjs");
 
-// ---- DB ----
 const db = require("./models");
 const { DataTypes } = require("sequelize");
 
-// ---- App ----
 const app = express();
 
 /* =========================
-   Allowed frontend origins
+   CORS
    ========================= */
 const DEFAULT_ORIGINS = [
   "https://servezy.in",
@@ -32,8 +33,12 @@ const FRONTENDS_LIST = (process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.spli
   .map((s) => s.trim())
   .filter(Boolean);
 
+// During local debugging you can set DEV_ALLOW_ALL_CORS=true to allow everything
+const DEV_ALLOW_ALL = String(process.env.DEV_ALLOW_ALL_CORS || "").toLowerCase() === "true";
+
 const isAllowedOrigin = (origin) => {
-  if (!origin) return true;
+  if (!origin) return true;              // RN/Expo often sends no Origin header
+  if (DEV_ALLOW_ALL) return true;
   if (FRONTENDS_LIST.includes(origin)) return true;
   try {
     const u = new URL(origin);
@@ -51,10 +56,9 @@ const corsConfig = {
 };
 
 /* =========================
-   Proxies & core middleware
+   Core middleware
    ========================= */
 app.set("trust proxy", 1);
-
 app.use(cors(corsConfig));
 app.use(
   helmet({
@@ -63,12 +67,10 @@ app.use(
     crossOriginEmbedderPolicy: false,
   })
 );
-
 app.use(compression());
 app.use(morgan(process.env.NODE_ENV === "production" ? "tiny" : "dev"));
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "250kb" }));
-
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
 /* =========================
@@ -109,7 +111,7 @@ const io = new Server(server, {
 });
 
 const emitToVendor = (vendorId, event, payload) => vendorId && io.to(`vendor:${vendorId}`).emit(event, payload);
-const emitToUser = (userId, event, payload) => userId && io.to(`user:${userId}`).emit(event, payload);
+const emitToUser   = (userId, event, payload)   => userId && io.to(`user:${userId}`).emit(event, payload);
 
 app.set("io", io);
 app.set("emitToVendor", emitToVendor);
@@ -118,13 +120,9 @@ app.set("emitToUser", emitToUser);
 io.on("connection", (socket) => {
   console.log("🔌 socket connected", socket.id);
   socket.emit("connected", { id: socket.id });
-
   socket.on("vendor:join", (vendorId) => vendorId && socket.join(`vendor:${vendorId}`));
-  socket.on("user:join", (userId) => userId && socket.join(`user:${userId}`));
-
-  socket.on("disconnect", (reason) => {
-    console.log("🔌 socket disconnected:", reason);
-  });
+  socket.on("user:join",   (userId)   => userId && socket.join(`user:${userId}`));
+  socket.on("disconnect", (reason) => console.log("🔌 socket disconnected:", reason));
 });
 
 /* =========================
@@ -132,68 +130,135 @@ io.on("connection", (socket) => {
    ========================= */
 const { VAPID_PUBLIC_KEY } = require("./utils/push");
 
-const authRoutes = require("./routes/authRoutes");
-const vendorRoutes = require("./routes/vendorRoutes");
-const menuItemRoutes = require("./routes/menuItemRoutes");
-const orderRoutes = require("./routes/orderRoutes");
-const adminRoutes = require("./routes/adminRoutes");
-const pushRoutes = require("./routes/pushRoutes");
-const uploadRoutes = require("./routes/uploadRoutes");
-const adminCleanupRoutes = require("./routes/adminCleanupRoutes");
-const debugRoutes = require("./routes/debugRoutes");
-const { table } = require("console");
+const authRoutes          = require("./routes/authRoutes");
+const vendorRoutes        = require("./routes/vendorRoutes");
+const menuItemRoutes      = require("./routes/menuItemRoutes");
+const orderRoutes         = require("./routes/orderRoutes");
+const adminRoutes         = require("./routes/adminRoutes");
+const pushRoutes          = require("./routes/pushRoutes");
+const uploadRoutes        = require("./routes/uploadRoutes");
+const adminCleanupRoutes  = require("./routes/adminCleanupRoutes");
+const debugRoutes         = require("./routes/debugRoutes");
 
 let paymentsRouter = null;
-try {
-  paymentsRouter = require("./routes/payments");
-} catch {
-  try {
-    paymentsRouter = require("./routes/paymentRoutes");
-  } catch {
-    console.warn("⚠️  payments router not found — skipping /api/payments");
-  }
+try { paymentsRouter = require("./routes/payments"); }
+catch {
+  try { paymentsRouter = require("./routes/paymentRoutes"); }
+  catch { console.warn("⚠️  payments router not found — skipping /api/payments"); }
 }
 
-const mountSafe = (p, r) => (r && typeof r === "function" ? app.use(p, r) : console.warn(`⚠️  Skipped mounting ${p}`));
-const mountWithEmit = (p, r) =>
-  r && typeof r === "function"
-    ? app.use(
-        p,
-        (req, _res, next) => {
-          req.emitToVendor = emitToVendor;
-          req.emitToUser = emitToUser;
-          next();
-        },
-        r
-      )
-    : console.warn(`⚠️  Skipped mounting ${p}`);
+// ===================================================
+// Enhanced mount helpers (with route logging)
+// ===================================================
+const describeRouter = (r) => {
+  try {
+    const stack = r?.stack || r?.handle?.stack || [];
+    return stack
+      .filter((l) => l && l.route && l.route.path)
+      .map((l) => ({
+        path: l.route.path,
+        methods: Object.keys(l.route.methods).map((m) => m.toUpperCase()),
+      }));
+  } catch {
+    return [];
+  }
+};
 
-mountSafe("/api/auth", authRoutes);
-mountSafe("/api/vendors", vendorRoutes);
-mountSafe("/api/menu-items", menuItemRoutes);
-mountWithEmit("/api/orders", orderRoutes);
-mountSafe("/api/push", pushRoutes);
-mountSafe("/api/admin", adminRoutes);
-mountSafe("/api/uploads", uploadRoutes);
+const mountSafe = (basePath, router) => {
+  if (router && typeof router === "function") {
+    app.use(basePath, router);
+    const list = describeRouter(router);
+    console.log(`[routes] mounted ${basePath} -> ${list.length} subroutes`);
+    list.forEach((r) => console.log(`  ${basePath}${r.path}  [${r.methods.join(", ")}]`));
+  } else {
+    console.warn(`⚠️  Skipped mounting ${basePath}`);
+  }
+};
+
+const mountWithEmit = (basePath, router) => {
+  if (router && typeof router === "function") {
+    app.use(
+      basePath,
+      (req, _res, next) => {
+        req.emitToVendor = emitToVendor;
+        req.emitToUser = emitToUser;
+        next();
+      },
+      router
+    );
+    const list = describeRouter(router);
+    console.log(`[routes] mounted ${basePath} (with emit) -> ${list.length} subroutes`);
+    list.forEach((r) => console.log(`  ${basePath}${r.path}  [${r.methods.join(", ")}]`));
+  } else {
+    console.warn(`⚠️  Skipped mounting ${basePath}`);
+  }
+};
+
+mountSafe("/api/auth",        authRoutes);
+mountSafe("/api/vendors",     vendorRoutes);
+mountSafe("/api/menu-items",  menuItemRoutes);
+mountWithEmit("/api/orders",  orderRoutes);
+mountSafe("/api/push",        pushRoutes);
+mountSafe("/api/admin",       adminRoutes);
+mountSafe("/api/uploads",     uploadRoutes);
 mountSafe("/api/admin-cleanup", adminCleanupRoutes);
 if (paymentsRouter) mountWithEmit("/api/payments", paymentsRouter);
 
 app.get("/public-key", (_req, res) => res.json({ publicKey: VAPID_PUBLIC_KEY || "" }));
 
-// Health
+// Health & debug
 app.get("/ping", (_req, res) => res.send("pong"));
 app.get("/healthz", (_req, res) => res.status(200).send("ok"));
+app.get("/api/healthz", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 app.get("/", (_req, res) => res.send("✅ Cloud Kitchen Backend is live!"));
 
 
+// ===== DEBUG (keep before 404) =====
+app.use("/api/debug", debugRoutes);
 
-// ===== TEMP DEBUG ENDPOINTS =====
+// ===== DEBUG route inspector (Express 4/5 compatible) =====
+app.get("/api/debug/routes", (req, res) => {
+  try {
+    const allRoutes = [];
+
+    const scanStack = (stack, base = "") => {
+      stack.forEach(layer => {
+        if (!layer) return;
+
+        if (layer.route && layer.route.path) {
+          // Direct route
+          const methods = Object.keys(layer.route.methods).map(m => m.toUpperCase());
+          allRoutes.push({
+            path: base + layer.route.path,
+            methods,
+          });
+        } else if (layer.name === "router" && layer.handle && Array.isArray(layer.handle.stack)) {
+          // Nested router (mounted with app.use)
+          const subBase = layer.regexp?.source
+            ?.replace("^\\/?", "/")
+            ?.replace("\\/?(?=\\/|$)", "")
+            ?.replace(/[$^]/g, "")
+            ?.replace(/\\\//g, "/") || "";
+          scanStack(layer.handle.stack, base + subBase);
+        }
+      });
+    };
+
+    if (app._router?.stack) scanStack(app._router.stack);
+
+    res.json({ count: allRoutes.length, routes: allRoutes });
+  } catch (err) {
+    console.error("❌ Route listing failed:", err);
+    res.status(500).json({ message: "Failed to list routes", error: err.message });
+  }
+});
+
 app.get("/api/debug/list-users", async (_req, res) => {
   try {
     const rows = await db.User.findAll({
       limit: 20,
       order: [["id", "ASC"]],
-      attributes: ["id", "name", "email", "role", "createdAt"]
+      attributes: ["id", "name", "email", "role", "createdAt"],
     });
     res.json({ count: rows.length, items: rows });
   } catch (err) {
@@ -218,7 +283,7 @@ app.get("/api/debug/check-user", async (req, res) => {
       id: user.id,
       email: user.email,
       role: user.role,
-      passwordStored: user.password.startsWith("$2") ? "hashed ✅" : "plain ❌",
+      passwordStored: user.password?.startsWith("$2") ? "hashed ✅" : "plain ❌",
       passwordMatch: password ? passwordMatch : "not tested",
     });
   } catch (err) {
@@ -242,9 +307,8 @@ app.post("/api/debug/seed-user", express.json(), async (req, res) => {
 });
 // ===== END DEBUG =====
 
-// 404 fallback
+// 404
 app.use((req, res) => res.status(404).json({ message: "Route not found" }));
-
 
 // Global error handler
 app.use((err, req, res, _next) => {
@@ -255,32 +319,28 @@ app.use((err, req, res, _next) => {
   res.status(500).json({ message: "Server error" });
 });
 
-app.use("/debug", debugRoutes); 
-
 /* =========================
-   Start + DB Fix
+   Start + DB fix
    ========================= */
-async function ensureVendorTimestamps() {
+async function ensureTimestamps(tableName) {
   const qi = db.sequelize.getQueryInterface();
-  let table;
+  let desc;
   try {
-    table = await qi.describeTable("vendors");
+    desc = await qi.describeTable(tableName);
   } catch {
     return;
   }
-
-  if (!table.createdAt) {
-    console.log('[db] Adding "createdAt" to vendors with default NOW()');
-    await qi.addColumn("vendors", "createdAt", {
+  if (!desc.createdAt) {
+    console.log(`[db] Adding "createdAt" to ${tableName} with default NOW()`);
+    await qi.addColumn(tableName, "createdAt", {
       type: DataTypes.DATE,
       allowNull: false,
       defaultValue: db.sequelize.literal("CURRENT_TIMESTAMP"),
     });
   }
-
-  if (!table.updatedAt) {
-    console.log('[db] Adding "updatedAt" to vendors with default NOW()');
-    await qi.addColumn("vendors", "updatedAt", {
+  if (!desc.updatedAt) {
+    console.log(`[db] Adding "updatedAt" to ${tableName} with default NOW()`);
+    await qi.addColumn(tableName, "updatedAt", {
       type: DataTypes.DATE,
       allowNull: false,
       defaultValue: db.sequelize.literal("CURRENT_TIMESTAMP"),
@@ -289,26 +349,27 @@ async function ensureVendorTimestamps() {
 }
 
 const PORT = process.env.PORT || 5000;
+const HOST = process.env.HOST || "0.0.0.0"; // ⬅️ important for devices on LAN
 server.keepAliveTimeout = 65000;
 server.headersTimeout = 66000;
 
 db.sequelize
   .authenticate()
   .then(async () => {
-    await ensureVendorTimestamps();
+    await ensureTimestamps("Users");
+    await ensureTimestamps("Vendors");
 
-    // sync only in dev
-    if (process.env.NODE_ENV !== "production") {
-      await db.sequelize.sync({ alter: true });
-      console.log("✅ DB synced successfully (dev only)");
+    if (process.env.NODE_ENV !== "production" && process.env.ALLOW_SYNC_DEV === "true") {
+      await db.sequelize.sync();
+      console.log("✅ DB synced (dev, safe mode)");
     } else {
-      console.log("⏭️  Skipping sequelize.sync in production");
+      console.log("⏭️  Skipping sequelize.sync (migrations-driven)");
     }
 
-    server.listen(PORT, () => {
-      console.log(`🚀 Server (HTTP + Socket.IO) listening on port ${PORT}`);
-      console.log("🌐 Allowed origins:", FRONTENDS_LIST.join(", "), " + *.netlify.app + localhost");
-      console.log("✅ Connecting to database:", process.env.DB_NAME);
+    server.listen(PORT, HOST, () => {
+      console.log(`🚀 Server (HTTP + Socket.IO) listening on http://${HOST}:${PORT}`);
+      console.log("🌐 Allowed origins:", DEV_ALLOW_ALL ? "ALL (DEV_ALLOW_ALL_CORS=true)" : FRONTENDS_LIST.join(", ") + " + *.netlify.app + localhost");
+      console.log("✅ DB:", process.env.DB_NAME || process.env.DATABASE_URL || "(env)");
     });
   })
   .catch((err) => {

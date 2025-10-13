@@ -118,14 +118,54 @@ router.get("/table-counts", async (req, res) => {
   }
 });
 
-
-// ✅ Peek at first rows of Users (optional)
-router.get("/users-preview", async (req, res) => {
+// GET /api/debug/routes  → shows all active routes
+router.get("/routes", async (req, res) => {
   try {
-    const [rows] = await db.sequelize.query(`SELECT * FROM "Users" LIMIT 5;`);
-    res.json(rows);
+    const app = req.app;
+    const routes = listRoutes(app);
+    res.json({ count: routes.length, routes });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ message: "Failed to list routes", error: err.message });
+  }
+});
+
+
+
+// ✅ Safe helper to list all Express routes (Express 4 & 5 compatible)
+function listRoutes(app) {
+  const routes = [];
+
+  const processStack = (stack, basePath = "") => {
+    stack.forEach((layer) => {
+      try {
+        if (layer.route && layer.route.path) {
+          const methods = Object.keys(layer.route.methods).map((m) => m.toUpperCase());
+          routes.push({ path: basePath + layer.route.path, methods });
+        } else if (layer.name === "router" && layer.handle && Array.isArray(layer.handle.stack)) {
+          // recursively process nested routers
+          processStack(layer.handle.stack, basePath + (layer.regexp?.source?.replace("^\\/", "/") || ""));
+        }
+      } catch {
+        // skip invalid layers
+      }
+    });
+  };
+
+  if (app && app._router && Array.isArray(app._router.stack)) {
+    processStack(app._router.stack);
+  }
+
+  return routes;
+}
+
+// ✅ /api/debug/routes endpoint
+router.get("/routes", (req, res) => {
+  try {
+    const routes = listRoutes(req.app);
+    res.json({ count: routes.length, routes });
+  } catch (err) {
+    console.error("listRoutes failed:", err);
+    res.status(500).json({ message: "Failed to list routes", error: err.message });
   }
 });
 
