@@ -391,6 +391,38 @@ app.post("/api/debug/seed-user", express.json(), async (req, res) => {
     res.status(500).json({ message: "Seed failed", error: err.message });
   }
 });
+
+
+
+// 1) List only the auth router's subroutes (what Express thinks is mounted under /api/auth)
+app.get("/api/debug/auth-routes", (_req, res) => {
+  try {
+    const r = authRoutes;
+    const stack = r?.stack || r?.handle?.stack || [];
+    const routes = stack
+      .filter(l => l?.route?.path)
+      .map(l => ({
+        path: l.route.path,
+        methods: Object.keys(l.route.methods || {}).map(m => m.toUpperCase())
+      }));
+    res.json({ base: "/api/auth", count: routes.length, routes });
+  } catch (e) {
+    res.status(500).json({ message: "auth-routes dump failed", error: e.message });
+  }
+});
+
+// 2) Simple ping on the auth base (proves the /api/auth mount works at all)
+app.get("/api/auth/ping", (_req, res) => res.json({ ok: true, where: "/api/auth/ping" }));
+
+// 3) Explicit probe for the exact path (bypasses authenticateToken)
+app.get("/api/auth/_probe_me", (_req, res) => res.json({ ok: true, path: "/api/auth/_probe_me" }));
+
+// 4) Log every unmatched request just before the 404 JSON
+app.use((req, _res, next) => {
+  // this runs only if nothing handled the request above
+  console.warn("[404 trace]", req.method, req.originalUrl);
+  next();
+});
 // ===== END DEBUG =====
 
 // 404
