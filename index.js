@@ -224,16 +224,10 @@ app.get("/api/debug/routes", (req, res) => {
     const scanStack = (stack, base = "") => {
       stack.forEach(layer => {
         if (!layer) return;
-
         if (layer.route && layer.route.path) {
-          // Direct route
           const methods = Object.keys(layer.route.methods).map(m => m.toUpperCase());
-          allRoutes.push({
-            path: base + layer.route.path,
-            methods,
-          });
+          allRoutes.push({ path: base + layer.route.path, methods });
         } else if (layer.name === "router" && layer.handle && Array.isArray(layer.handle.stack)) {
-          // Nested router (mounted with app.use)
           const subBase = layer.regexp?.source
             ?.replace("^\\/?", "/")
             ?.replace("\\/?(?=\\/|$)", "")
@@ -252,6 +246,9 @@ app.get("/api/debug/routes", (req, res) => {
     res.status(500).json({ message: "Failed to list routes", error: err.message });
   }
 });
+
+// mount after inspector
+app.use("/api/debug", debugRoutes);
 
 app.get("/api/debug/list-users", async (_req, res) => {
   try {
