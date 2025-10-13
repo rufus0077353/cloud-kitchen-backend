@@ -188,4 +188,46 @@ router.get("/check", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
+
+// Get current authenticated user
+router.get("/me", authenticateToken, async (req, res) => {
+  try {
+    // req.user is injected by authenticateToken middleware
+    const user = await User.findByPk(req.user.userId, {
+      attributes: ["id", "name", "email", "role"],
+      include: [
+        {
+          model: Vendor,
+          attributes: ["id", "name", "location", "isOpen"],
+          required: false,
+        },
+      ],
+    });
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // respond with clean shape
+    res.json({
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      vendorId: user.Vendor ? user.Vendor.id : null,
+      vendor: user.Vendor
+        ? {
+            id: user.Vendor.id,
+            name: user.Vendor.name,
+            location: user.Vendor.location,
+            isOpen: user.Vendor.isOpen,
+          }
+        : null,
+    });
+  } catch (err) {
+    console.error("❌ /auth/me failed:", err);
+    res.status(500).json({ message: "Failed to fetch user profile", error: err.message });
+  }
+});
+
 module.exports = router;

@@ -21,12 +21,6 @@ const { notifyUser } = require("../utils/notifications");
 // ===================== PAYOUTS SUMMARY HELPERS =====================
 const COMMISSION_PCT = Number(process.env.COMMISSION_PCT || 0.15);
 
-const parseDate = (v) => {
-  if (!v) return null;
-  const d = new Date(v);
-  return Number.isFinite(d.getTime()) ? d : null;
-};
-
 async function safeSum(model, field, where) {
   try {
     const n = await model.sum(field, { where });
@@ -755,35 +749,83 @@ router.delete("/:id", authenticateToken, async (req, res) => {
 });
 
 /* ===================== FILTER (GET/POST) ===================== */
+
+// --- /api/orders/filter (GET/POST) ---
+// Admin-only filter with safe query parsing + pagination.
+
+const parseDateSafe = (v) => {
+  if (!v) return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
 async function filterHandler(req, res) {
- const src = req.method === "GET" ? req.query : req.body;
- const { UserId, VendorId, status, startDate, endDate } = src;
+  try {
+    // 1) Admin gate
+    const role = String(req.user?.role || "").toLowerCase();
+    if (role !== "admin") {
+      return res
+        .status(403)
+        .json({ message: "Forbidden: only admins can view all orders" });
+    }
 
- const where = {};
- if (UserId) where.UserId = UserId;
- if (VendorId) where.VendorId = VendorId;
- if (status) where.status = status;
- if (startDate || endDate) {
-   where.createdAt = {};
-   if (startDate) where.createdAt[Op.gte] = new Date(startDate);
-   if (endDate)   where.createdAt[Op.lte] = new Date(endDate);
- }
+    // 2) Accept params from query (GET) or body (POST)
+    const src = req.method === "GET" ? req.query : req.body;
+    const { UserId, VendorId, status, startDate, endDate, page, pageSize } = src;
 
- try {
-   const orders = await Order.findAll({
-     where,
-     include: [
-       { model: User, attributes: ["id", "name", "email"] },
-       { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
-       { model: MenuItem, attributes: ["id", "name", "price"], through: { attributes: ["quantity"] } },
-     ],
-     order: [["createdAt", "DESC"]],
-   });
-   return res.json({ items: orders });
- } catch (err) {
-   return res.status(500).json({ message: "Error filtering orders", error: err.message });
- }
+    // 3) Build 'where' safely
+    const where = {};
+    if (UserId) where.UserId = Number(UserId);
+    if (VendorId) where.VendorId = Number(VendorId);
+    if (status) where.status = status;
+
+    const start = parseDateSafe(startDate);
+    const end = parseDateSafe(endDate);
+    if ((startDate && !start) || (endDate && !end)) {
+      return res
+        .status(400)
+        .json({ message: "Invalid date format. Use ISO 8601 (YYYY-MM-DD)." });
+    }
+    if (start || end) {
+      where.createdAt = {};
+      if (start) where.createdAt[Op.gte] = start;
+      if (end) where.createdAt[Op.lte] = end;
+    }
+
+    // 4) Pagination
+    const p = Math.max(1, Number(page) || 1);
+    const sz = Math.max(1, Math.min(200, Number(pageSize) || 50));
+
+    const { count, rows } = await Order.findAndCountAll({
+      where,
+      include: [
+        { model: User, attributes: ["id", "name", "email"] },
+        { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
+        {
+          model: OrderItem,
+          include: [{ model: MenuItem, attributes: ["id", "name", "price"] }],
+        },
+      ],
+      order: [["createdAt", "DESC"]],
+      limit: sz,
+      offset: (p - 1) * sz,
+    });
+
+    return res.json({
+      items: rows,
+      total: count,
+      page: p,
+      pageSize: sz,
+      totalPages: Math.ceil(count / sz),
+    });
+  } catch (err) {
+    console.error("GET/POST /orders/filter error:", err);
+    return res
+      .status(500)
+      .json({ message: "Error filtering orders", error: err.message });
+  }
 }
+
 router.get("/filter", authenticateToken, filterHandler);
 router.post("/filter", authenticateToken, filterHandler);
 
@@ -978,8 +1020,17 @@ router.get("/:id/invoice.pdf", authenticateToken, async (req, res) => {
  }
 });
 
+// shared date parser at top (avoid redefining in functions)
+function parseDate(input) {
+  if (!input || typeof input !== "string") return null;
+  const s = input.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return new Date(`${s}T00:00:00`);
+  const m = /^(\d{2})-(\d{2})-(\d{4})$/.exec(s);
+  if (m) return new Date(`${m[3]}-${m[2]}-${m[1]}T00:00:00`);
+  return null;
+}
 
-// /orders/payouts/summary  → for VENDOR dashboards
+// ✅ VENDOR PAYOUT SUMMARY
 router.get("/payouts/summary", authenticateToken, async (req, res) => {
   try {
     const role = String(req.user?.role || "").toLowerCase();
@@ -987,27 +1038,18 @@ router.get("/payouts/summary", authenticateToken, async (req, res) => {
       return res.status(403).json({ message: "Vendor only" });
     }
 
-    // Identify vendor (from token or query)
-    const VendorId = req.user?.VendorId || req.user?.id || null;
+    // resolve vendor ID from token or attached vendor record
+    const VendorId = req.user?.VendorId || req.user?.vendorId || null;
     if (!VendorId) {
       return res.status(400).json({ message: "Missing VendorId" });
     }
 
     // optional date filters
-    const parseDate = (d) => {
-      if (!d) return null;
-      const t = d.trim?.();
-      if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return new Date(`${t}T00:00:00`);
-      const m = /^(\d{2})-(\d{2})-(\d{4})$/.exec(t);
-      if (m) return new Date(`${m[3]}-${m[2]}-${m[1]}T00:00:00`);
-      return null;
-    };
-
     const from = parseDate(req.query.from);
-    const to   = parseDate(req.query.to);
+    const to = parseDate(req.query.to);
     const createdAt = {};
     if (from) createdAt[Op.gte] = from;
-    if (to)   createdAt[Op.lte] = new Date(new Date(to).setHours(23, 59, 59, 999));
+    if (to) createdAt[Op.lte] = new Date(new Date(to).setHours(23, 59, 59, 999));
 
     const where = {
       VendorId,
@@ -1016,18 +1058,27 @@ router.get("/payouts/summary", authenticateToken, async (req, res) => {
       ...(from || to ? { createdAt } : {}),
     };
 
-    const paidOrders = await Order.count({ where });
-    const grossPaid  = await Order.sum("totalAmount", { where }) || 0;
+    const [agg] = await Order.findAll({
+      attributes: [
+        [fn("COUNT", col("Order.id")), "paidOrders"],
+        [fn("SUM", col("totalAmount")), "grossPaid"],
+      ],
+      where,
+      raw: true,
+    });
 
+    const paidOrders = Number(agg?.paidOrders || 0);
+    const grossPaid = Number(agg?.grossPaid || 0);
     const commission = +(grossPaid * COMMISSION_PCT).toFixed(2);
-    const netOwed    = +(grossPaid - commission).toFixed(2);
+    const netOwed = +(grossPaid - commission).toFixed(2);
 
-    const unpaidWhere = {
-      VendorId,
-      status: { [Op.notIn]: ["rejected"] },
-      paymentStatus: { [Op.ne]: "paid" },
-    };
-    const grossUnpaid = (await Order.sum("totalAmount", { where: unpaidWhere })) || 0;
+    // unpaid
+    const [unpaidAgg] = await Order.findAll({
+      attributes: [[fn("SUM", col("totalAmount")), "grossUnpaid"]],
+      where: { ...where, paymentStatus: { [Op.ne]: "paid" } },
+      raw: true,
+    });
+    const grossUnpaid = Number(unpaidAgg?.grossUnpaid || 0);
 
     return res.json({
       VendorId,
@@ -1039,25 +1090,24 @@ router.get("/payouts/summary", authenticateToken, async (req, res) => {
       rate: COMMISSION_PCT,
     });
   } catch (err) {
-    console.error("payouts/summary (vendor) error:", err?.stack || err);
-    return res.json(null);
+    console.error("❌ payouts/summary (vendor) error:", err);
+    return res.status(500).json({ message: "Failed to compute vendor payouts" });
   }
 });
 
-// ✅ Admin payout summary route
+// ✅ ADMIN PAYOUT SUMMARY
 router.get("/payouts/summary/all", authenticateToken, async (req, res) => {
   try {
-    const role = (req.user?.role || "").toLowerCase();
+    const role = String(req.user?.role || "").toLowerCase();
     if (role !== "admin") {
       return res.status(403).json({ message: "Admin only" });
     }
 
     const from = parseDate(req.query.from);
     const to = parseDate(req.query.to);
-
     const createdAt = {};
     if (from) createdAt[Op.gte] = from;
-    if (to) createdAt[Op.lte] = to;
+    if (to) createdAt[Op.lte] = new Date(new Date(to).setHours(23, 59, 59, 999));
 
     const where = {
       status: { [Op.notIn]: ["rejected"] },
@@ -1068,21 +1118,21 @@ router.get("/payouts/summary/all", authenticateToken, async (req, res) => {
     const rows = await Order.findAll({
       attributes: [
         "VendorId",
-        [sequelize.fn("COUNT", sequelize.col("Order.id")), "paidOrders"],
-        [sequelize.fn("SUM", sequelize.col("totalAmount")), "grossPaid"],
+        [fn("COUNT", col("Order.id")), "paidOrders"],
+        [fn("SUM", col("totalAmount")), "grossPaid"],
       ],
       where,
       include: [{ model: Vendor, attributes: ["id", "name"] }],
       group: ["VendorId", "Vendor.id"],
-      order: [[sequelize.fn("SUM", sequelize.col("totalAmount")), "DESC"]],
+      order: [[fn("SUM", col("totalAmount")), "DESC"]],
+      raw: false,
     });
 
     const out = (rows || []).map((r) => {
-      const grossPaid = Number(r.get("grossPaid")) || 0;
-      const paidOrders = Number(r.get("paidOrders")) || 0;
+      const grossPaid = Number(r.get?.("grossPaid") ?? r.grossPaid ?? 0) || 0;
+      const paidOrders = Number(r.get?.("paidOrders") ?? r.paidOrders ?? 0) || 0;
       const commission = +(grossPaid * COMMISSION_PCT).toFixed(2);
       const netOwed = +(grossPaid - commission).toFixed(2);
-
       return {
         vendorId: r.VendorId,
         vendorName: r.Vendor?.name || `#${r.VendorId}`,
@@ -1097,7 +1147,7 @@ router.get("/payouts/summary/all", authenticateToken, async (req, res) => {
     return res.json(out);
   } catch (err) {
     console.error("❌ payouts/summary/all error:", err);
-    return res.status(500).json({ message: "Internal server error" });
+    return res.json([]);
   }
 });
 
