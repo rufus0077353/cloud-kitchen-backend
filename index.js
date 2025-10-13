@@ -277,30 +277,59 @@ app.get("/api/debug/has-auth-me", (req, res) => {
   }
 });
 
+// ===== DEBUG route inspector (Express 4/5 hardened) =====
 app.get("/api/debug/routes", (req, res) => {
   try {
-    const allRoutes = [];
+    const routes = [];
 
-    const scanStack = (stack, base = "") => {
-      stack.forEach(layer => {
-        if (!layer) return;
-        if (layer.route && layer.route.path) {
-          const methods = Object.keys(layer.route.methods).map(m => m.toUpperCase());
-          allRoutes.push({ path: base + layer.route.path, methods });
-        } else if (layer.name === "router" && layer.handle && Array.isArray(layer.handle.stack)) {
-          const subBase = layer.regexp?.source
-            ?.replace("^\\/?", "/")
-            ?.replace("\\/?(?=\\/|$)", "")
-            ?.replace(/[$^]/g, "")
-            ?.replace(/\\\//g, "/") || "";
-          scanStack(layer.handle.stack, base + subBase);
-        }
-      });
+    // Safely convert a layer regexp to a readable path prefix
+    const layerPrefix = (layer) => {
+      if (!layer || !layer.regexp) return "";
+      let src = layer.regexp.source || "";
+      // Common express-toString cleanups
+      src = src
+        .replace(/^\^\\\//, "/")          // ^\/ -> /
+        .replace(/\\\/\?\(\?=\\\/\|\$\)\$$/, "") // optional trailing slash group
+        .replace(/\\\//g, "/")            // \/ -> /
+        .replace(/\^\?/, "")
+        .replace(/\$$/, "");
+      if (src === "(?:^/)?") return "/";
+      return src;
     };
 
-    if (app._router?.stack) scanStack(app._router.stack);
+    const scan = (stack, base = "") => {
+      if (!Array.isArray(stack)) return;
 
-    res.json({ count: allRoutes.length, routes: allRoutes });
+      for (const layer of stack) {
+        if (!layer) continue;
+
+        // Direct route
+        if (layer.route && layer.route.path) {
+          const methods = Object.keys(layer.route.methods || {}).map((m) => m.toUpperCase());
+          routes.push({
+            path: base + layer.route.path,
+            methods: methods.length ? methods : ["<ALL>"],
+          });
+          continue;
+        }
+
+        // Mounted router or middleware that wraps another stack
+        const child = layer.handle && Array.isArray(layer.handle.stack) ? layer.handle.stack : null;
+        if (child) {
+          const prefix = layerPrefix(layer);
+          scan(child, base + prefix);
+        }
+      }
+    };
+
+    const root = app && app._router && app._router.stack;
+    scan(root, "");
+
+    // Quick diagnostics (visible in server logs)
+    console.log("[route-inspector] layers:", Array.isArray(root) ? root.length : "n/a",
+                "found routes:", routes.length);
+
+    res.json({ count: routes.length, routes });
   } catch (err) {
     console.error("❌ Route listing failed:", err);
     res.status(500).json({ message: "Failed to list routes", error: err.message });
