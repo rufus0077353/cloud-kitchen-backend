@@ -131,6 +131,7 @@ io.on("connection", (socket) => {
 const { VAPID_PUBLIC_KEY } = require("./utils/push");
 
 const authRoutes          = require("./routes/authRoutes");
+console.log("[debug] Loaded authRoutes", typeof authRoutes);
 const vendorRoutes        = require("./routes/vendorRoutes");
 const menuItemRoutes      = require("./routes/menuItemRoutes");
 const orderRoutes         = require("./routes/orderRoutes");
