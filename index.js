@@ -217,6 +217,65 @@ app.get("/", (_req, res) => res.send("✅ Cloud Kitchen Backend is live!"));
 app.use("/api/debug", debugRoutes);
 
 // ===== DEBUG route inspector (Express 4/5 compatible) =====
+
+// --- DEBUG: quick version + uptime (confirms you’re on the code you expect)
+app.get("/api/debug/version", (_req, res) => {
+  res.json({
+    startedAt: new Date(process.uptime() * -1000 + Date.now()).toISOString(),
+    now: new Date().toISOString(),
+    node: process.version,
+    pid: process.pid,
+    routesMounted: true,
+  });
+});
+
+// --- DEBUG: precise check for /api/auth/me being mounted
+app.get("/api/debug/has-auth-me", (req, res) => {
+  try {
+    const found = [];
+
+    const walk = (stack, base = "") => {
+      if (!Array.isArray(stack)) return;
+      for (const layer of stack) {
+        if (!layer) continue;
+
+        // concrete route (e.g. router.get('/me', ...))
+        if (layer.route && layer.route.path) {
+          const p = base + layer.route.path;
+          const methods = Object.keys(layer.route.methods).map((m) => m.toUpperCase());
+          if (p === "/api/auth/me") {
+            found.push({ path: p, methods });
+          }
+        }
+
+        // nested router (mounted with app.use('/api/auth', router))
+        if (layer.handle && Array.isArray(layer.handle.stack)) {
+          // try to recover the mount path from the regexp in Express' layer
+          let mount = "";
+          const src = layer.regexp && layer.regexp.toString(); // e.g. /^\/api\/auth\/?(?=\/|$)/i
+          if (src) {
+            // very lenient: pull out "/api/auth" from the regex string
+            const match = src.match(/^\s*\/\^\\(\/.+?)\\\/\?\(\?=\\\/\|\$\)\/i?$/) || src.match(/^\s*\/\^\\(\/.+?)\\\/\?/);
+            if (match && match[1]) {
+              mount = match[1].replace(/\\\//g, "/"); // unescape slashes
+            }
+          }
+          walk(layer.handle.stack, base + mount);
+        }
+      }
+    };
+
+    if (app._router && Array.isArray(app._router.stack)) {
+      walk(app._router.stack, "");
+    }
+
+    res.json({ hasAuthMe: found.length > 0, matches: found });
+  } catch (e) {
+    console.error("has-auth-me inspector failed:", e);
+    res.status(500).json({ message: "inspector failed", error: e.message });
+  }
+});
+
 app.get("/api/debug/routes", (req, res) => {
   try {
     const allRoutes = [];
