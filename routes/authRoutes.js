@@ -189,27 +189,23 @@ router.get("/check", authenticateToken, requireAdmin, async (req, res) => {
 });
 
 
-// Get current authenticated user
+// --- current user (auth/me) ---
 router.get("/me", authenticateToken, async (req, res) => {
   try {
-    // req.user is injected by authenticateToken middleware
-    const user = await User.findByPk(req.user.userId, {
-      attributes: ["id", "name", "email", "role"],
-      include: [
-        {
-          model: Vendor,
-          attributes: ["id", "name", "location", "isOpen"],
-          required: false,
-        },
-      ],
-    });
-
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
+    // support either req.user.id or req.user.userId set by your middleware
+    const userId = Number(req.user?.id ?? req.user?.userId);
+    if (!Number.isFinite(userId)) {
+      return res.status(401).json({ message: "Unauthorized: no user id on request" });
     }
 
-    // respond with clean shape
-    res.json({
+    const user = await User.findByPk(userId, {
+      attributes: ["id", "name", "email", "role"],
+      include: [{ model: Vendor, attributes: ["id", "name", "location", "isOpen"] }],
+    });
+
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    return res.json({
       id: user.id,
       name: user.name,
       email: user.email,
@@ -226,8 +222,13 @@ router.get("/me", authenticateToken, async (req, res) => {
     });
   } catch (err) {
     console.error("❌ /auth/me failed:", err);
-    res.status(500).json({ message: "Failed to fetch user profile", error: err.message });
+    res.status(500).json({ message: "Internal error" });
   }
 });
 
+
+//--- simple probe  to confirm this file is loaded ---
+router.get("/debug/version", (_req, res) => {
+  res.json({ file: __filename, now: new Date().toISOString() });
+});
 module.exports = router;
