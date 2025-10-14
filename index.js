@@ -15,6 +15,8 @@ const bcrypt = require("bcryptjs");
 
 const db = require("./models");
 const { DataTypes } = require("sequelize");
+const resolvedAuthPath =require.resolve("./routes/authRoutes");
+console.log("[mount] authRoutes file:", resolvedAuthPath);
 
 const app = express();
 
@@ -424,6 +426,57 @@ app.use((req, _res, next) => {
   next();
 });
 // ===== END DEBUG =====
+
+// ===== TEMP DIRECT /api/auth/me (bypass router) =====
+const jwt = require("jsonwebtoken");
+const { User, Vendor } = require("./models");
+const JWT_SECRET = process.env.JWT_SECRET || "nani@143";
+
+app.get("/api/auth/me", async (req, res) => {
+  try {
+    const ah = req.headers.authorization || "";
+    const token = ah.startsWith("Bearer ") ? ah.slice(7) : null;
+    if (!token) return res.status(401).json({ message: "Token missing" });
+
+    let decoded;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch {
+      return res.status(401).json({ message: "Invalid or expired token" });
+    }
+
+    const uid = Number(decoded.userId ?? decoded.id);
+    if (!Number.isFinite(uid)) {
+      return res.status(401).json({ message: "Invalid token payload" });
+    }
+
+    const user = await User.findByPk(uid, {
+      attributes: ["id", "name", "email", "role"],
+      include: [{ model: Vendor, attributes: ["id", "name", "location", "isOpen"] }],
+    });
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    return res.json({
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      vendorId: user.Vendor ? user.Vendor.id : null,
+      vendor: user.Vendor
+        ? {
+            id: user.Vendor.id,
+            name: user.Vendor.name,
+            location: user.Vendor.location,
+            isOpen: user.Vendor.isOpen,
+          }
+        : null,
+    });
+  } catch (err) {
+    console.error("TEMP /api/auth/me failed:", err);
+    res.status(500).json({ message: "Internal error" });
+  }
+});
+// ===== END TEMP DIRECT /api/auth/me =====
 
 // 404
 app.use((req, res) => res.status(404).json({ message: "Route not found" }));
