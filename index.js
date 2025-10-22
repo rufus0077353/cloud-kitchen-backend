@@ -108,7 +108,7 @@ const server = http.createServer(app);
 const io = new Server(server, {
   path: "/socket.io",
   cors: corsConfig,
-  transports: ["websocket"],
+  transports: ["websocket", "polling"],
   pingInterval: 25000,
   cookie: false,
   pingTimeout: 60000,
