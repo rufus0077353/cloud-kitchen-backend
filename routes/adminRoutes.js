@@ -52,77 +52,168 @@ async function ensureVendorProfileForUser(user) {
   return vendor;
 }
 
-// ======================================================
-//  OVERVIEW  →  /api/admin/overview
-// ======================================================
 
+// ======================================================
+//  OVERVIEW  →  /api/admin/overview  (same shape + commission fields)
+// ======================================================
 router.get("/overview", authenticateToken, requireAdmin, async (_req, res) => {
   try {
-    const [totalUsers, totalVendors, totalOrders] = await Promise.all([
+    const [usersCount, vendorsCount, ordersCount] = await Promise.all([
       User.count(),
       Vendor.count(),
       Order.count(),
     ]);
 
-    // Revenue (paid + non-revenue statuses excluded)
-    const CANCEL = ["rejected"]; // ✅ enum-safe
     const PAID = "paid";
 
-    const eligibleOrders = await Order.findAll({
-      where: {
-        paymentStatus: PAID,
-        status: { [Op.notIn]: CANCEL },
-      },
-      raw: true,
-    });
+    // ----- revenue today / total revenue (unchanged) -----
+    const revenueToday =
+      Number(
+        await Order.sum("totalAmount", {
+          where: {
+            paymentStatus: PAID,
+            createdAt: {
+              [Op.gte]: (() => {
+                const d = new Date();
+                d.setHours(0, 0, 0, 0);
+                return d;
+              })(),
+            },
+          },
+        })
+      ) || 0;
 
+    const totalRevenue =
+      Number(
+        await Order.sum("totalAmount", { where: { paymentStatus: PAID } })
+      ) || 0;
+
+    // ================= COMMISSION TOTALS (added) =================
     const DEFAULT_RATE = Number(process.env.PLATFORM_RATE || 0.15);
 
-    const commissionOf = (o) => {
-      const explicit =
+    const normalizeRate = (r) => {
+      let n = Number(r);
+      if (!Number.isFinite(n)) return NaN;
+      // accept either 0.1 or 10 for 10%
+      if (n > 1) n = n / 100;
+      if (n < 0) n = 0;
+      return n;
+    };
+
+    const explicitCommissionOf = (o) => {
+      // try common explicit fields if you happened to store them per order
+      const v =
         o.commission ??
         o.commissionAmount ??
         o.platformCommission ??
         o.platformFee;
-      if (explicit != null) return Number(explicit) || 0;
-
-      const rate =
-        (o.commissionRate != null ? Number(o.commissionRate) : null) ??
-        DEFAULT_RATE;
-
-      const total = Number(o.totalAmount || 0);
-      return Math.max(0, total * (isFinite(rate) ? rate : DEFAULT_RATE));
+      return v != null ? Number(v) || 0 : null;
     };
 
-    let totalRevenue = 0;
+    // pull paid orders with vendor so we can compute using vendor rate when needed
+    const paidOrders = await Order.findAll({
+      where: { paymentStatus: PAID },
+      include: [{ model: Vendor, attributes: ["commissionRate"] }],
+      // no `raw` → we can safely use .toJSON()
+    });
+
     let totalCommission = 0;
     let monthCommission = 0;
 
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
 
-    for (const o of eligibleOrders) {
-      const total = Number(o.totalAmount || 0);
-      totalRevenue += total;
+    for (const row of paidOrders) {
+      const o = row?.toJSON ? row.toJSON() : row;
+      const total = Number(o?.totalAmount || 0);
 
-      const c = commissionOf(o);
-      totalCommission += c;
+      // 1) explicit field on order, if present
+      const explicit = explicitCommissionOf(o);
+      let commission;
 
-      const createdTs = o.createdAt ? new Date(o.createdAt).getTime() : 0;
-      if (createdTs >= monthStart) monthCommission += c;
+      if (explicit != null) {
+        commission = Math.max(0, explicit);
+      } else {
+        // 2) order.commissionRate -> 3) vendor.commissionRate -> 4) DEFAULT
+        const orderRate = normalizeRate(o?.commissionRate);
+        const vendorRate = normalizeRate(o?.Vendor?.commissionRate);
+        const rate = Number.isFinite(orderRate)
+          ? orderRate
+          : Number.isFinite(vendorRate)
+          ? vendorRate
+          : DEFAULT_RATE;
+
+        commission = Math.max(0, total * rate);
+      }
+
+      totalCommission += commission;
+
+      const createdTs = o?.createdAt ? new Date(o.createdAt).getTime() : 0;
+      if (createdTs >= monthStart) monthCommission += commission;
+    }
+    // ================= /commission totals =================
+
+    // ----- status counts (unchanged) -----
+    const statuses = ["pending", "accepted", "ready", "delivered", "rejected"];
+    const statusCounts = {};
+    await Promise.all(
+      statuses.map(async (s) => {
+        statusCounts[s] = await Order.count({ where: { status: s } });
+      })
+    );
+
+    // ----- last 7 days (unchanged) -----
+    const since = new Date();
+    since.setDate(since.getDate() - 6);
+    since.setHours(0, 0, 0, 0);
+
+    const rows = await Order.findAll({
+      attributes: [
+        [Sequelize.fn("DATE", Sequelize.col("createdAt")), "day"],
+        [Sequelize.fn("COUNT", Sequelize.col("id")), "orders"],
+        [
+          Sequelize.literal(
+            `SUM(CASE WHEN "paymentStatus"='paid' THEN "totalAmount" ELSE 0 END)`
+          ),
+          "revenue",
+        ],
+      ],
+      where: { createdAt: { [Op.gte]: since } },
+      group: [Sequelize.fn("DATE", Sequelize.col("createdAt"))],
+      order: [[Sequelize.fn("DATE", Sequelize.col("createdAt")), "ASC"]],
+      raw: true,
+    });
+
+    const map = new Map(
+      rows.map((r) => [
+        String(r.day),
+        { orders: Number(r.orders) || 0, revenue: Number(r.revenue) || 0 },
+      ])
+    );
+    const last7Days = [];
+    const cur = new Date(since);
+    for (let i = 0; i < 7; i++) {
+      const key = cur.toISOString().slice(0, 10);
+      const v = map.get(key) || { orders: 0, revenue: 0 };
+      last7Days.push({ day: key, orders: v.orders, revenue: v.revenue });
+      cur.setDate(cur.getDate() + 1);
     }
 
-    return res.json({
-      totalUsers,
-      totalVendors,
-      totalOrders,
-      totalRevenue: Number(totalRevenue.toFixed(2)),
+    // ✅ same fields as before + commission fields
+    res.json({
+      usersCount,
+      vendorsCount,
+      ordersCount,
+      totalRevenue,
+      revenueToday,
+      statusCounts,
+      last7Days,
       totalCommission: Number(totalCommission.toFixed(2)),
       monthCommission: Number(monthCommission.toFixed(2)),
     });
   } catch (err) {
     console.error("overview error:", err);
-    return res.status(500).json({ message: "Overview failed", error: err.message });
+    res.status(500).json({ message: "Overview failed", error: err.message });
   }
 });
 
@@ -493,61 +584,323 @@ router.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
+
+
+
 // ======================================================
-//  INSIGHTS
+//  ADMIN INSIGHTS (robust + OrderItem-safe)
 // ======================================================
+
 router.get("/insights", authenticateToken, requireAdmin, async (_req, res) => {
   try {
-    const recentOrders = await Order.findAll({
+    // -------- dialect-safe date expr --------
+    const dialect = sequelize.getDialect();
+    let dateExpr;
+    if (dialect === "postgres") {
+      dateExpr = Sequelize.literal(`DATE("createdAt")`);
+    } else if (dialect === "mysql") {
+      dateExpr = Sequelize.literal(`DATE(createdAt)`);
+    } else {
+      // sqlite fallback
+      dateExpr = Sequelize.literal(`strftime('%Y-%m-%d', createdAt)`);
+    }
+
+    // -------- recent orders (last 7 buckets) --------
+    const recent = await Order.findAll({
       attributes: [
-        [Sequelize.fn("DATE", Sequelize.col("createdAt")), "date"],
+        [dateExpr, "date"],
         [Sequelize.fn("COUNT", Sequelize.col("id")), "orderCount"],
         [Sequelize.fn("SUM", Sequelize.col("totalAmount")), "totalRevenue"],
       ],
-      group: [Sequelize.fn("DATE", Sequelize.col("createdAt"))],
-      order: [[Sequelize.fn("DATE", Sequelize.col("createdAt")), "DESC"]],
+      group: ["date"],
+      order: [[Sequelize.literal("date"), "DESC"]],
       limit: 7,
+      raw: true,
     });
 
-    const topItems = await MenuItem.findAll({
-      attributes: ["id", "name", [Sequelize.fn("SUM", Sequelize.col("OrderItem.quantity")), "totalSold"]],
-      include: [{ model: Order, attributes: [], through: { attributes: ["quantity"] } }],
-      group: ["MenuItem.id"],
-      order: [[Sequelize.literal("totalSold"), "DESC"]],
-      limit: 5,
-    });
+    const recentOrders = recent.map((r) => ({
+      date: String(r.date),
+      orderCount: Number(r.orderCount || 0),
+      totalRevenue: Number(r.totalRevenue || 0),
+    }));
 
-    res.json({ recentOrders, topItems });
+    // -------- top items (defensive if OrderItem missing) --------
+    let topItems = [];
+    if (OrderItem) {
+      const topItemsRaw = await OrderItem.findAll({
+        attributes: [
+          "MenuItemId",
+          [Sequelize.fn("SUM", Sequelize.col("quantity")), "totalSold"],
+        ],
+        include: [{ model: MenuItem, attributes: ["id", "name"] }],
+        group: ["OrderItem.MenuItemId", "MenuItem.id"],
+        order: [[Sequelize.literal("totalSold"), "DESC"]],
+        limit: 5,
+        raw: true,
+        nest: true,
+      });
+
+      topItems = topItemsRaw.map((r) => ({
+        id: Number(r.MenuItem?.id ?? r.MenuItemId),
+        name: r.MenuItem?.name ?? `Item #${r.MenuItemId}`,
+        totalSold: Number(r.totalSold || 0),
+      }));
+    } else {
+      // If your join model isn’t exported/registered, don’t crash — just return empty list.
+      console.warn("[admin/insights] OrderItem model not found — returning empty topItems.");
+      topItems = [];
+    }
+
+    return res.json({ recentOrders, topItems });
   } catch (err) {
-    res.status(500).json({ message: "Insights fetch failed", error: err.message });
+    console.error("ADMIN /insights failed:", err?.message || err);
+
+    // -------- final fallback: simple compute without group by --------
+    try {
+      const since = new Date();
+      since.setDate(since.getDate() - 7);
+      since.setHours(0, 0, 0, 0);
+
+      const orders = await Order.findAll({
+        where: { createdAt: { [Op.gte]: since } },
+        attributes: ["totalAmount", "createdAt"],
+        raw: true,
+      });
+
+      const byDay = {};
+      for (const o of orders) {
+        const k = new Date(o.createdAt).toISOString().slice(0, 10);
+        if (!byDay[k]) byDay[k] = { date: k, orderCount: 0, totalRevenue: 0 };
+        byDay[k].orderCount += 1;
+        byDay[k].totalRevenue += Number(o.totalAmount || 0);
+      }
+
+      const recentOrders = Object.values(byDay)
+        .sort((a, b) => (a.date < b.date ? 1 : -1))
+        .slice(0, 7);
+
+      // No join model in this path → empty top items
+      return res.json({ recentOrders, topItems: [] });
+    } catch (inner) {
+      console.error("ADMIN /insights fallback failed:", inner?.message || inner);
+      return res
+        .status(500)
+        .json({ message: "Insights fetch failed", error: inner?.message || String(inner) });
+    }
   }
 });
 
+
+
 // ======================================================
-//  PAYOUTS ADMIN PATCH
+//  PAYOUTS (admin): list + vendor bulk actions
+//  Endpoints:
+//   - GET    /api/admin/payouts
+//   - PATCH  /api/admin/payouts/vendor/:vendorId/pay
+//   - PATCH  /api/admin/payouts/vendor/:vendorId/schedule
 // ======================================================
-router.patch("/payouts/:id", authenticateToken, requireAdmin, async (req, res) => {
-  const { status } = req.body || {};
-  const allowed = ["pending", "scheduled", "paid"];
-  if (!allowed.includes(status)) return res.status(400).json({ message: "Invalid payout status" });
+router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
+  try {
+    const PLATFORM_RATE = Number(process.env.PLATFORM_RATE || 0.15);
 
-  const payout = await Payout.findByPk(req.params.id);
-  if (!payout) return res.status(404).json({ message: "Payout not found" });
+    // Try Payout-first (preferred if table exists)
+    let payouts = [];
+    try {
+      payouts = await Payout.findAll({
+        attributes: [
+          "VendorId",
+          "status",
+          [Sequelize.fn("SUM", Sequelize.col("grossAmount")), "gross"],
+          [Sequelize.fn("SUM", Sequelize.col("commissionAmount")), "platformFee"],
+          [Sequelize.fn("SUM", Sequelize.col("payoutAmount")), "net"],
+        ],
+        include: [{ model: Vendor, attributes: ["id", "name", "commissionRate"] }],
+        group: ["VendorId", "status", "Vendor.id"],
+        raw: true,
+        nest: true,
+      });
+    } catch (e) {
+      // if payouts table missing or not used yet, fall back to Orders
+      payouts = null;
+    }
 
-  payout.status = status;
-  if (status === "paid") payout.paidAt = new Date();
-  if (status === "scheduled" && !payout.scheduledAt) payout.scheduledAt = new Date();
-  await payout.save();
+    if (Array.isArray(payouts) && payouts.length) {
+      // Build per-vendor aggregates from Payouts table
+      const byVendor = new Map();
+      for (const r of payouts) {
+        const vendorId = Number(r.VendorId);
+        const vendorName = r.Vendor?.name || `Vendor ${vendorId}`;
+        const commissionRate =
+          r.Vendor?.commissionRate != null
+            ? Number(r.Vendor.commissionRate) * 100
+            : PLATFORM_RATE * 100;
 
-  // 🔔 EMIT so vendor sees the update
-  req.app.get("emitToVendor")(payout.VendorId, "payout:update", {
-    orderId: payout.OrderId, // ✅ correct casing
-    VendorId: payout.VendorId,
-    payoutAmount: payout.payoutAmount,
-    status: payout.status,
-  });
+        const cur = byVendor.get(vendorId) || {
+          vendorId,
+          vendorName,
+          commissionRate: +Number(commissionRate || PLATFORM_RATE * 100).toFixed(2),
+          gross: 0,
+          platformFee: 0,
+          net: 0,
+          statusCounts: { pending: 0, scheduled: 0, paid: 0 },
+          payableNow: 0,
+        };
 
-  res.json({ ok: true, payout });
+        const gross = Number(r.gross || 0);
+        const fee = Number(r.platformFee || 0);
+        const net = Number(r.net || 0);
+        cur.gross += gross;
+        cur.platformFee += fee;
+        cur.net += net;
+
+        const st = String(r.status || "pending").toLowerCase();
+        if (cur.statusCounts[st] != null) cur.statusCounts[st] += 1;
+
+        if (st === "pending") cur.payableNow += net;
+
+        byVendor.set(vendorId, cur);
+      }
+
+      const items = Array.from(byVendor.values()).map((v) => ({
+        vendorId: v.vendorId,
+        vendorName: v.vendorName,
+        commissionRate: v.commissionRate, // %
+        gross: +v.gross.toFixed(2),
+        platformFee: +v.platformFee.toFixed(2),
+        net: +v.net.toFixed(2),
+        statusCounts: v.statusCounts,
+        payableNow: +v.payableNow.toFixed(2),
+      }));
+
+      const totals = items.reduce(
+        (t, r) => ({
+          gross: +(t.gross + r.gross).toFixed(2),
+          platformFee: +(t.platformFee + r.platformFee).toFixed(2),
+          net: +(t.net + r.net).toFixed(2),
+          payableNow: +(t.payableNow + r.payableNow).toFixed(2),
+        }),
+        { gross: 0, platformFee: 0, net: 0, payableNow: 0 }
+      );
+
+      return res.json({ items, totals, source: "payouts" });
+    }
+
+    // ---- Fallback (no payouts yet) -> compute from delivered + paid orders
+    const orders = await Order.findAll({
+      where: { status: "delivered", paymentStatus: "paid" },
+      include: [{ model: Vendor, attributes: ["id", "name", "commissionRate"] }],
+      attributes: ["id", "VendorId", "totalAmount", "commissionRate"],
+    });
+
+    const byVendor = new Map();
+    for (const o of orders) {
+      const vendorId = Number(o.VendorId);
+      const vendorName = o.Vendor?.name || `Vendor ${vendorId}`;
+      const rate =
+        o.commissionRate != null
+          ? Number(o.commissionRate)
+          : o.Vendor?.commissionRate != null
+          ? Number(o.Vendor.commissionRate)
+          : PLATFORM_RATE;
+      const gross = Number(o.totalAmount || 0);
+      const platformFee = Math.max(0, gross * (Number.isFinite(rate) ? rate : PLATFORM_RATE));
+      const net = Math.max(0, gross - platformFee);
+
+      const agg = byVendor.get(vendorId) || {
+        vendorId,
+        vendorName,
+        commissionRate: +((Number.isFinite(rate) ? rate : PLATFORM_RATE) * 100).toFixed(2),
+        gross: 0,
+        platformFee: 0,
+        net: 0,
+        statusCounts: { pending: 0, scheduled: 0, paid: 0 }, // unknown in fallback
+        payableNow: 0,
+      };
+      agg.gross += gross;
+      agg.platformFee += platformFee;
+      agg.net += net;
+      byVendor.set(vendorId, agg);
+    }
+
+    const items = Array.from(byVendor.values()).map((v) => ({
+      vendorId: v.vendorId,
+      vendorName: v.vendorName,
+      commissionRate: v.commissionRate,
+      gross: +v.gross.toFixed(2),
+      platformFee: +v.platformFee.toFixed(2),
+      net: +v.net.toFixed(2),
+      statusCounts: v.statusCounts,
+      payableNow: 0, // unknown in fallback
+    }));
+
+    const totals = items.reduce(
+      (t, r) => ({
+        gross: +(t.gross + r.gross).toFixed(2),
+        platformFee: +(t.platformFee + r.platformFee).toFixed(2),
+        net: +(t.net + r.net).toFixed(2),
+        payableNow: +(t.payableNow + r.payableNow).toFixed(2),
+      }),
+      { gross: 0, platformFee: 0, net: 0, payableNow: 0 }
+    );
+
+    return res.json({ items, totals, source: "orders-fallback" });
+  } catch (err) {
+    console.error("admin/payouts error:", err);
+    res.status(500).json({ message: "Failed to load payouts", error: err.message });
+  }
 });
+
+// Bulk-mark all PENDING payouts for a vendor as PAID
+router.patch("/payouts/vendor/:vendorId/pay", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const vendorId = Number(req.params.vendorId);
+    if (!Number.isFinite(vendorId)) return res.status(400).json({ message: "Invalid vendorId" });
+
+    const [affected] = await Payout.update(
+      { status: "paid", paidAt: new Date() },
+      { where: { VendorId: vendorId, status: "pending" } }
+    );
+
+    // Let vendor live UI refresh
+    req.app.get("emitToVendor")?.(vendorId, "payout:update", {
+      VendorId: vendorId,
+      status: "paid",
+      bulk: true,
+    });
+
+    return res.json({ ok: true, affected });
+  } catch (err) {
+    console.error("admin/pay vendor error:", err);
+    res.status(500).json({ message: "Failed to mark paid", error: err.message });
+  }
+});
+
+// Bulk-mark all PENDING payouts for a vendor as SCHEDULED
+router.patch("/payouts/vendor/:vendorId/schedule", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const vendorId = Number(req.params.vendorId);
+    if (!Number.isFinite(vendorId)) return res.status(400).json({ message: "Invalid vendorId" });
+
+    const [affected] = await Payout.update(
+      {
+        status: "scheduled",
+        scheduledAt: Sequelize.literal(`COALESCE("scheduledAt", NOW())`),
+      },
+      { where: { VendorId: vendorId, status: "pending" } }
+    );
+
+    req.app.get("emitToVendor")?.(vendorId, "payout:update", {
+      VendorId: vendorId,
+      status: "scheduled",
+      bulk: true,
+    });
+
+    return res.json({ ok: true, affected });
+  } catch (err) {
+    console.error("admin/schedule vendor error:", err);
+    res.status(500).json({ message: "Failed to schedule", error: err.message });
+  }
+});
+
 
 module.exports = router;

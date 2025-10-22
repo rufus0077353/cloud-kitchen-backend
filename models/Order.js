@@ -11,6 +11,9 @@ module.exports = (sequelize, DataTypes) => {
       paidAt:        { type: DataTypes.DATE, allowNull: true },
       note:          { type: DataTypes.TEXT,  allowNull: true },
       address:       { type: DataTypes.TEXT,  allowNull: true },
+      cancelledAt:    { type: DataTypes.DATE,  allowNull: true },
+      refundStatus:   { type: DataTypes.ENUM("none", "pending", "success", "failed"),
+                       allowNull: false, defaultValue: "none" },
     },
     { tableName: "Orders", timestamps: true }
   );
