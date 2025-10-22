@@ -201,6 +201,13 @@ router.get("/overview", authenticateToken, requireAdmin, async (_req, res) => {
 
     // ✅ same fields as before + commission fields
     res.json({
+
+      //existing fields
+      totalUsers: usersCount,
+      totalVendors: vendorsCount,
+      totalOrders: ordersCount,
+
+      
       usersCount,
       vendorsCount,
       ordersCount,
