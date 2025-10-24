@@ -856,6 +856,79 @@ router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
   }
 });
 
+// ---------- Payout helpers (safe rate calc) ----------
+function normalizeRate(n, fallback) {
+  let r = Number(n);
+  if (!Number.isFinite(r)) r = Number(fallback);
+  if (!Number.isFinite(r)) r = DEFAULT_PLATFORM_RATE;
+  // accept 10 or 0.10
+  if (r > 1) r = r / 100;
+  if (r < 0) r = 0;
+  return r;
+}
+
+async function createPendingPayoutForOrder(orderRow) {
+  // expects Order instance with Vendor joined (commissionRate)
+  const o = orderRow?.toJSON ? orderRow.toJSON() : orderRow;
+  if (!o) return null;
+
+  // skip if payout already exists for this order
+  const exists = await Payout.findOne({ where: { OrderId: o.id } });
+  if (exists) return null;
+
+  const gross = Number(o.totalAmount || 0);
+  const rate  = normalizeRate(
+    o.commissionRate ?? o?.Vendor?.commissionRate,
+    DEFAULT_PLATFORM_RATE
+  );
+  const fee   = Math.max(0, gross * rate);
+  const net   = Math.max(0, gross - fee);
+
+  const payout = await Payout.create({
+    OrderId: o.id,
+    VendorId: o.VendorId,
+    status: "pending",           // pending | scheduled | paid
+    grossAmount: gross,
+    commissionAmount: fee,
+    payoutAmount: net,
+  });
+
+  return payout;
+}
+
+// ---------------------------------------------------------------------
+// POST /api/admin/payouts/backfill
+// Creates pending Payout rows for every delivered+paid order that
+// doesn’t already have one. After you run this once, your UI will show
+// `source: payouts` and the action buttons will light up.
+// ---------------------------------------------------------------------
+router.post("/payouts/backfill", authenticateToken, requireAdmin, async (_req, res) => {
+  try {
+    const paidDelivered = await Order.findAll({
+      where: { status: "delivered", paymentStatus: "paid" },
+      include: [{ model: Vendor, attributes: ["id", "commissionRate"] }],
+      attributes: ["id", "VendorId", "totalAmount", "commissionRate"],
+      order: [["id", "ASC"]],
+    });
+
+    let created = 0, skipped = 0;
+    for (const row of paidDelivered) {
+      const already = await Payout.findOne({ where: { OrderId: row.id } });
+      if (already) { skipped++; continue; }
+      await createPendingPayoutForOrder(row);
+      created++;
+    }
+
+    // tell any live clients to refresh (optional)
+    try { _req.app.get("io")?.emit("payments:refresh"); } catch {}
+
+    return res.json({ ok: true, created, skipped, totalScanned: paidDelivered.length });
+  } catch (err) {
+    console.error("payouts/backfill error:", err);
+    return res.status(500).json({ message: "Backfill failed", error: err.message });
+  }
+});
+
 // Bulk-mark all PENDING payouts for a vendor as PAID
 router.patch("/payouts/vendor/:vendorId/pay", authenticateToken, requireAdmin, async (req, res) => {
   try {
