@@ -706,11 +706,12 @@ router.get("/insights", authenticateToken, requireAdmin, async (_req, res) => {
 //   - PATCH  /api/admin/payouts/vendor/:vendorId/pay
 //   - PATCH  /api/admin/payouts/vendor/:vendorId/schedule
 // ======================================================
+// --- Admin payouts summary (safe if Orders.commissionRate column doesn't exist) ---
 router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
   try {
     const PLATFORM_RATE = Number(process.env.PLATFORM_RATE || 0.15);
 
-    // Try Payout-first (preferred if table exists)
+    // 1) Prefer the Payouts table if you have it
     let payouts = [];
     try {
       payouts = await Payout.findAll({
@@ -726,18 +727,16 @@ router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
         raw: true,
         nest: true,
       });
-    } catch (e) {
-      // if payouts table missing or not used yet, fall back to Orders
-      payouts = null;
+    } catch {
+      payouts = null; // table not there / not used yet
     }
 
     if (Array.isArray(payouts) && payouts.length) {
-      // Build per-vendor aggregates from Payouts table
       const byVendor = new Map();
       for (const r of payouts) {
         const vendorId = Number(r.VendorId);
         const vendorName = r.Vendor?.name || `Vendor ${vendorId}`;
-        const commissionRate =
+        const ratePct =
           r.Vendor?.commissionRate != null
             ? Number(r.Vendor.commissionRate) * 100
             : PLATFORM_RATE * 100;
@@ -745,7 +744,7 @@ router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
         const cur = byVendor.get(vendorId) || {
           vendorId,
           vendorName,
-          commissionRate: +Number(commissionRate || PLATFORM_RATE * 100).toFixed(2),
+          commissionRate: +Number(ratePct).toFixed(2), // %
           gross: 0,
           platformFee: 0,
           net: 0,
@@ -762,7 +761,6 @@ router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
 
         const st = String(r.status || "pending").toLowerCase();
         if (cur.statusCounts[st] != null) cur.statusCounts[st] += 1;
-
         if (st === "pending") cur.payableNow += net;
 
         byVendor.set(vendorId, cur);
@@ -771,7 +769,7 @@ router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
       const items = Array.from(byVendor.values()).map((v) => ({
         vendorId: v.vendorId,
         vendorName: v.vendorName,
-        commissionRate: v.commissionRate, // %
+        commissionRate: v.commissionRate, // already in %
         gross: +v.gross.toFixed(2),
         platformFee: +v.platformFee.toFixed(2),
         net: +v.net.toFixed(2),
@@ -792,23 +790,24 @@ router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
       return res.json({ items, totals, source: "payouts" });
     }
 
-    // ---- Fallback (no payouts yet) -> compute from delivered + paid orders
+    // 2) Fallback: compute from delivered & paid orders, using VENDOR rate ONLY
     const orders = await Order.findAll({
       where: { status: "delivered", paymentStatus: "paid" },
       include: [{ model: Vendor, attributes: ["id", "name", "commissionRate"] }],
-      attributes: ["id", "VendorId", "totalAmount", "commissionRate"],
+      // IMPORTANT: do NOT reference a non-existent column here
+      attributes: ["id", "VendorId", "totalAmount"], // <-- removed "commissionRate"
     });
 
     const byVendor = new Map();
     for (const o of orders) {
       const vendorId = Number(o.VendorId);
       const vendorName = o.Vendor?.name || `Vendor ${vendorId}`;
-      const rate =
-        o.commissionRate != null
-          ? Number(o.commissionRate)
-          : o.Vendor?.commissionRate != null
-          ? Number(o.Vendor.commissionRate)
-          : PLATFORM_RATE;
+
+      // use vendor rate if set, else platform default
+      const rate = o.Vendor?.commissionRate != null
+        ? Number(o.Vendor.commissionRate)
+        : PLATFORM_RATE;
+
       const gross = Number(o.totalAmount || 0);
       const platformFee = Math.max(0, gross * (Number.isFinite(rate) ? rate : PLATFORM_RATE));
       const net = Math.max(0, gross - platformFee);
@@ -816,12 +815,12 @@ router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
       const agg = byVendor.get(vendorId) || {
         vendorId,
         vendorName,
-        commissionRate: +((Number.isFinite(rate) ? rate : PLATFORM_RATE) * 100).toFixed(2),
+        commissionRate: +((Number.isFinite(rate) ? rate : PLATFORM_RATE) * 100).toFixed(2), // %
         gross: 0,
         platformFee: 0,
         net: 0,
         statusCounts: { pending: 0, scheduled: 0, paid: 0 }, // unknown in fallback
-        payableNow: 0,
+        payableNow: 0, // not known without Payouts table
       };
       agg.gross += gross;
       agg.platformFee += platformFee;
@@ -832,12 +831,12 @@ router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
     const items = Array.from(byVendor.values()).map((v) => ({
       vendorId: v.vendorId,
       vendorName: v.vendorName,
-      commissionRate: v.commissionRate,
+      commissionRate: v.commissionRate, // %
       gross: +v.gross.toFixed(2),
       platformFee: +v.platformFee.toFixed(2),
       net: +v.net.toFixed(2),
       statusCounts: v.statusCounts,
-      payableNow: 0, // unknown in fallback
+      payableNow: 0,
     }));
 
     const totals = items.reduce(
