@@ -964,24 +964,61 @@ async function createPendingPayoutForOrder(orderRow) {
 }
 
 // Backfill delivered+paid orders into Payouts (pending)
-router.post("/payouts/backfill", authenticateToken, requireAdmin, async (_req, res) => {
+// --- quick ping so you can verify Render has this code ---
+router.get("/payouts/ping", authenticateToken, requireAdmin, (_req, res) => {
+  res.json({ ok: true, where: "/api/admin/payouts/ping" });
+});
+
+/**
+ * /api/admin/payouts/backfill
+ * Accept BOTH GET and POST so it's easy to trigger.
+ * Creates pending payout rows for every delivered+paid order
+ * that doesn't already have one.
+ */
+router.all("/payouts/backfill", authenticateToken, requireAdmin, async (_req, res) => {
   try {
+    // ensure helper exists in this file (see below) or inline it
     const paidDelivered = await Order.findAll({
       where: { status: "delivered", paymentStatus: "paid" },
       include: [{ model: Vendor, attributes: ["id", "commissionRate"] }],
-      attributes: ["id", "VendorId", "totalAmount"],
+      attributes: ["id", "VendorId", "totalAmount"], // do NOT select Order.commissionRate if that column doesn't exist
       order: [["id", "ASC"]],
     });
 
     let created = 0, skipped = 0;
     for (const row of paidDelivered) {
-      const already = await Payout.findOne({ where: { OrderId: row.id } });
-      if (already) { skipped++; continue; }
-      await createPendingPayoutForOrder(row);
+      const exists = await Payout.findOne({ where: { OrderId: row.id } });
+      if (exists) { skipped++; continue; }
+
+      // normalize rate (accepts 0.1 or 10)
+      const normalizeRate = (n, fallback) => {
+        let r = Number(n);
+        if (!Number.isFinite(r)) r = Number(fallback);
+        if (!Number.isFinite(r)) r = Number(process.env.PLATFORM_RATE || 0.15);
+        if (r > 1) r = r / 100;
+        if (r < 0) r = 0;
+        return r;
+      };
+
+      const gross = Number(row.totalAmount || 0);
+      const rate  = normalizeRate(row?.Vendor?.commissionRate, process.env.PLATFORM_RATE || 0.15);
+      const fee   = Math.max(0, gross * rate);
+      const net   = Math.max(0, gross - fee);
+
+      await Payout.create({
+        OrderId: row.id,
+        VendorId: row.VendorId,
+        status: "pending",          // pending | scheduled | paid
+        grossAmount: gross,
+        commissionAmount: fee,
+        payoutAmount: net,
+      });
       created++;
     }
 
+    // tell live UIs to refresh (optional)
     try { _req.app.get("io")?.emit("payments:refresh"); } catch {}
+
     return res.json({ ok: true, created, skipped, totalScanned: paidDelivered.length });
   } catch (err) {
     console.error("payouts/backfill error:", err);

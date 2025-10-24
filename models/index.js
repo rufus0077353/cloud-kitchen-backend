@@ -1,4 +1,7 @@
+
 // models/index.js
+const path = require("path");
+const fs = require("fs");
 const Sequelize = require("sequelize");
 const sequelize = require("../config/db");
 
@@ -6,29 +9,48 @@ const db = {};
 db.Sequelize = Sequelize;
 db.sequelize = sequelize;
 
-/* ------------------ safe model loader ------------------ */
-function loadModel(name) {
-  try {
-    const mod = require(`./${name}`); // ensure file name matches exactly on Linux
-    if (typeof mod === "function") {
-      return mod(sequelize, Sequelize.DataTypes);
+/* ------------------ robust model loader ------------------ */
+/** Try to load a model from several case/variant filenames. */
+function loadModel(name, variants = []) {
+  const tried = [];
+  const candidates = [name, ...variants].map(n => `./${n}`);
+  for (const rel of candidates) {
+    try {
+      const mod = require(rel); // case-sensitive on Linux
+      if (typeof mod === "function") {
+        const m = mod(sequelize, Sequelize.DataTypes);
+        console.log(`[models] Loaded ${name} from ${rel}`);
+        return m;
+      } else {
+        console.warn(`[models] ${rel} did not export a factory function — skipped`);
+      }
+    } catch (e) {
+      tried.push(`${rel} (${e.code || e.message})`);
     }
-    console.warn(`[models] ${name} did not export a factory function — skipped`);
-    return null;
-  } catch (e) {
-    console.warn(`[models] Skipping ${name}: ${e.message}`);
-    return null;
   }
+  console.warn(`[models] Skipping ${name}: could not load any of -> ${tried.join(", ")}`);
+  return null;
 }
 
+/* Optional: print what's in /models at runtime to spot casing issues */
+try {
+  const files = fs.readdirSync(__dirname).filter(f => f.endsWith(".js"));
+  console.log("[models] Files present:", files.join(", "));
+} catch {}
+
 /* ------------------ load models ------------------ */
-db.User             = loadModel("User");
-db.Vendor           = loadModel("Vendor");
-db.MenuItem         = loadModel("MenuItem");
-db.Order            = loadModel("Order");
-db.OrderItem        = loadModel("OrderItem");
-db.Payout           = loadModel("Payout");            // <-- must exist as ./Payout.js (capital P)
-db.PushSubscription = loadModel("PushSubscription");  // optional, if file exists
+db.User          = loadModel("User");
+db.Vendor        = loadModel("Vendor");
+db.MenuItem      = loadModel("MenuItem");
+db.Order         = loadModel("Order");
+db.OrderItem     = loadModel("OrderItem");
+
+// Try common variants in case the file got named differently.
+// The FIRST match wins; still best to keep it exactly "Payout.js".
+db.Payout        = loadModel("Payout", ["payout", "Payouts", "payouts"]);
+
+// Optional
+db.PushSubscription = loadModel("PushSubscription");
 
 /* ------------------ associations (guarded) ------------------ */
 // User ↔ Vendor (1:1)
