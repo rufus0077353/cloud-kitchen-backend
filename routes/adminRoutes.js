@@ -700,21 +700,22 @@ router.get("/insights", authenticateToken, requireAdmin, async (_req, res) => {
 
 
 // ======================================================
-//  PAYOUTS (admin): list + vendor bulk actions
-//  Endpoints:
-//   - GET    /api/admin/payouts
-//   - PATCH  /api/admin/payouts/vendor/:vendorId/pay
-//   - PATCH  /api/admin/payouts/vendor/:vendorId/schedule
+// PAYOUTS (admin): list + vendor bulk actions
+// Endpoints:
+//  - GET    /api/admin/payouts
+//  - POST   /api/admin/payouts/backfill
+//  - PATCH  /api/admin/payouts/vendor/:vendorId/pay
+//  - PATCH  /api/admin/payouts/vendor/:vendorId/schedule
 // ======================================================
-// --- Admin payouts summary (safe if Orders.commissionRate column doesn't exist) ---
+
 router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
   try {
     const PLATFORM_RATE = Number(process.env.PLATFORM_RATE || 0.15);
 
-    // 1) Prefer the Payouts table if you have it
-    let payouts = [];
+    // ---------- Attempt 1: NEW payouts schema (grossAmount / commissionAmount / payoutAmount) ----------
+    let rowsNew = null;
     try {
-      payouts = await Payout.findAll({
+      rowsNew = await Payout.findAll({
         attributes: [
           "VendorId",
           "status",
@@ -727,13 +728,13 @@ router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
         raw: true,
         nest: true,
       });
-    } catch {
-      payouts = null; // table not there / not used yet
+    } catch (e) {
+      rowsNew = null;
     }
 
-    if (Array.isArray(payouts) && payouts.length) {
+    if (Array.isArray(rowsNew) && rowsNew.length) {
       const byVendor = new Map();
-      for (const r of payouts) {
+      for (const r of rowsNew) {
         const vendorId = Number(r.VendorId);
         const vendorName = r.Vendor?.name || `Vendor ${vendorId}`;
         const ratePct =
@@ -744,7 +745,7 @@ router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
         const cur = byVendor.get(vendorId) || {
           vendorId,
           vendorName,
-          commissionRate: +Number(ratePct).toFixed(2), // %
+          commissionRate: +Number(ratePct).toFixed(2), // already %
           gross: 0,
           platformFee: 0,
           net: 0,
@@ -755,6 +756,7 @@ router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
         const gross = Number(r.gross || 0);
         const fee = Number(r.platformFee || 0);
         const net = Number(r.net || 0);
+
         cur.gross += gross;
         cur.platformFee += fee;
         cur.net += net;
@@ -766,10 +768,10 @@ router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
         byVendor.set(vendorId, cur);
       }
 
-      const items = Array.from(byVendor.values()).map((v) => ({
+      const items = Array.from(byVendor.values()).map(v => ({
         vendorId: v.vendorId,
         vendorName: v.vendorName,
-        commissionRate: v.commissionRate, // already in %
+        commissionRate: v.commissionRate, // %
         gross: +v.gross.toFixed(2),
         platformFee: +v.platformFee.toFixed(2),
         net: +v.net.toFixed(2),
@@ -790,23 +792,96 @@ router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
       return res.json({ items, totals, source: "payouts" });
     }
 
-    // 2) Fallback: compute from delivered & paid orders, using VENDOR rate ONLY
+    // ---------- Attempt 2: LEGACY payouts schema (amount + status) ----------
+    let rowsLegacy = null;
+    try {
+      rowsLegacy = await Payout.findAll({
+        attributes: [
+          "VendorId",
+          "status",
+          [Sequelize.fn("SUM", Sequelize.col("amount")), "netLegacy"],
+          // commission unknown in legacy: treat as 0, store rate for display only
+        ],
+        include: [{ model: Vendor, attributes: ["id", "name", "commissionRate"] }],
+        group: ["VendorId", "status", "Vendor.id"],
+        raw: true,
+        nest: true,
+      });
+    } catch (e) {
+      rowsLegacy = null;
+    }
+
+    if (Array.isArray(rowsLegacy) && rowsLegacy.length) {
+      const byVendor = new Map();
+
+      for (const r of rowsLegacy) {
+        const vendorId = Number(r.VendorId);
+        const vendorName = r.Vendor?.name || `Vendor ${vendorId}`;
+        const ratePct =
+          r.Vendor?.commissionRate != null
+            ? Number(r.Vendor.commissionRate) * 100
+            : PLATFORM_RATE * 100;
+
+        const cur = byVendor.get(vendorId) || {
+          vendorId,
+          vendorName,
+          commissionRate: +Number(ratePct).toFixed(2),
+          gross: 0,
+          platformFee: 0,
+          net: 0,
+          statusCounts: { pending: 0, scheduled: 0, paid: 0 },
+          payableNow: 0,
+        };
+
+        const net = Number(r.netLegacy || 0);
+        // Legacy table has only "amount" (net). We don't know gross/fee -> set gross=net, fee=0
+        cur.net += net;
+        cur.gross += net;
+
+        const st = String(r.status || "pending").toLowerCase();
+        if (cur.statusCounts[st] != null) cur.statusCounts[st] += 1;
+        if (st === "pending") cur.payableNow += net;
+
+        byVendor.set(vendorId, cur);
+      }
+
+      const items = Array.from(byVendor.values()).map(v => ({
+        vendorId: v.vendorId,
+        vendorName: v.vendorName,
+        commissionRate: v.commissionRate,
+        gross: +v.gross.toFixed(2),
+        platformFee: 0,
+        net: +v.net.toFixed(2),
+        statusCounts: v.statusCounts,
+        payableNow: +v.payableNow.toFixed(2),
+      }));
+
+      const totals = items.reduce(
+        (t, r) => ({
+          gross: +(t.gross + r.gross).toFixed(2),
+          platformFee: +(t.platformFee + r.platformFee).toFixed(2),
+          net: +(t.net + r.net).toFixed(2),
+          payableNow: +(t.payableNow + r.payableNow).toFixed(2),
+        }),
+        { gross: 0, platformFee: 0, net: 0, payableNow: 0 }
+      );
+
+      return res.json({ items, totals, source: "payouts-legacy" });
+    }
+
+    // ---------- Attempt 3: Fallback from Orders ----------
     const orders = await Order.findAll({
       where: { status: "delivered", paymentStatus: "paid" },
       include: [{ model: Vendor, attributes: ["id", "name", "commissionRate"] }],
-      // IMPORTANT: do NOT reference a non-existent column here
-      attributes: ["id", "VendorId", "totalAmount"], // <-- removed "commissionRate"
+      attributes: ["id", "VendorId", "totalAmount"],
     });
 
     const byVendor = new Map();
     for (const o of orders) {
       const vendorId = Number(o.VendorId);
       const vendorName = o.Vendor?.name || `Vendor ${vendorId}`;
-
-      // use vendor rate if set, else platform default
-      const rate = o.Vendor?.commissionRate != null
-        ? Number(o.Vendor.commissionRate)
-        : PLATFORM_RATE;
+      const rate =
+        o.Vendor?.commissionRate != null ? Number(o.Vendor.commissionRate) : PLATFORM_RATE;
 
       const gross = Number(o.totalAmount || 0);
       const platformFee = Math.max(0, gross * (Number.isFinite(rate) ? rate : PLATFORM_RATE));
@@ -815,12 +890,12 @@ router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
       const agg = byVendor.get(vendorId) || {
         vendorId,
         vendorName,
-        commissionRate: +((Number.isFinite(rate) ? rate : PLATFORM_RATE) * 100).toFixed(2), // %
+        commissionRate: +((Number.isFinite(rate) ? rate : PLATFORM_RATE) * 100).toFixed(2),
         gross: 0,
         platformFee: 0,
         net: 0,
-        statusCounts: { pending: 0, scheduled: 0, paid: 0 }, // unknown in fallback
-        payableNow: 0, // not known without Payouts table
+        statusCounts: { pending: 0, scheduled: 0, paid: 0 },
+        payableNow: 0,
       };
       agg.gross += gross;
       agg.platformFee += platformFee;
@@ -828,10 +903,10 @@ router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
       byVendor.set(vendorId, agg);
     }
 
-    const items = Array.from(byVendor.values()).map((v) => ({
+    const items = Array.from(byVendor.values()).map(v => ({
       vendorId: v.vendorId,
       vendorName: v.vendorName,
-      commissionRate: v.commissionRate, // %
+      commissionRate: v.commissionRate,
       gross: +v.gross.toFixed(2),
       platformFee: +v.platformFee.toFixed(2),
       net: +v.net.toFixed(2),
@@ -856,11 +931,10 @@ router.get("/payouts", authenticateToken, requireAdmin, async (_req, res) => {
   }
 });
 
-// ---------- Payout helpers (safe rate calc) ----------
-function normalizeRate(n, fallback) {
+// ---------- Helpers (use PLATFORM_RATE, not DEFAULT_PLATFORM_RATE) ----------
+function normalizeRate(n, fallbackPct) {
   let r = Number(n);
-  if (!Number.isFinite(r)) r = Number(fallback);
-  if (!Number.isFinite(r)) r = DEFAULT_PLATFORM_RATE;
+  if (!Number.isFinite(r)) r = Number(fallbackPct);
   // accept 10 or 0.10
   if (r > 1) r = r / 100;
   if (r < 0) r = 0;
@@ -868,46 +942,34 @@ function normalizeRate(n, fallback) {
 }
 
 async function createPendingPayoutForOrder(orderRow) {
-  // expects Order instance with Vendor joined (commissionRate)
   const o = orderRow?.toJSON ? orderRow.toJSON() : orderRow;
   if (!o) return null;
-
-  // skip if payout already exists for this order
   const exists = await Payout.findOne({ where: { OrderId: o.id } });
   if (exists) return null;
 
+  const PLATFORM_RATE = Number(process.env.PLATFORM_RATE || 0.15);
   const gross = Number(o.totalAmount || 0);
-  const rate  = normalizeRate(
-    o.commissionRate ?? o?.Vendor?.commissionRate,
-    DEFAULT_PLATFORM_RATE
-  );
+  const rate  = normalizeRate(o?.Vendor?.commissionRate, PLATFORM_RATE);
   const fee   = Math.max(0, gross * rate);
   const net   = Math.max(0, gross - fee);
 
-  const payout = await Payout.create({
+  return Payout.create({
     OrderId: o.id,
     VendorId: o.VendorId,
-    status: "pending",           // pending | scheduled | paid
+    status: "pending", // pending | scheduled | paid
     grossAmount: gross,
     commissionAmount: fee,
     payoutAmount: net,
   });
-
-  return payout;
 }
 
-// ---------------------------------------------------------------------
-// POST /api/admin/payouts/backfill
-// Creates pending Payout rows for every delivered+paid order that
-// doesn’t already have one. After you run this once, your UI will show
-// `source: payouts` and the action buttons will light up.
-// ---------------------------------------------------------------------
+// Backfill delivered+paid orders into Payouts (pending)
 router.post("/payouts/backfill", authenticateToken, requireAdmin, async (_req, res) => {
   try {
     const paidDelivered = await Order.findAll({
       where: { status: "delivered", paymentStatus: "paid" },
       include: [{ model: Vendor, attributes: ["id", "commissionRate"] }],
-      attributes: ["id", "VendorId", "totalAmount" ],
+      attributes: ["id", "VendorId", "totalAmount"],
       order: [["id", "ASC"]],
     });
 
@@ -919,9 +981,7 @@ router.post("/payouts/backfill", authenticateToken, requireAdmin, async (_req, r
       created++;
     }
 
-    // tell any live clients to refresh (optional)
     try { _req.app.get("io")?.emit("payments:refresh"); } catch {}
-
     return res.json({ ok: true, created, skipped, totalScanned: paidDelivered.length });
   } catch (err) {
     console.error("payouts/backfill error:", err);
@@ -929,7 +989,7 @@ router.post("/payouts/backfill", authenticateToken, requireAdmin, async (_req, r
   }
 });
 
-// Bulk-mark all PENDING payouts for a vendor as PAID
+// Bulk mark PENDING → PAID
 router.patch("/payouts/vendor/:vendorId/pay", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const vendorId = Number(req.params.vendorId);
@@ -940,13 +1000,7 @@ router.patch("/payouts/vendor/:vendorId/pay", authenticateToken, requireAdmin, a
       { where: { VendorId: vendorId, status: "pending" } }
     );
 
-    // Let vendor live UI refresh
-    req.app.get("emitToVendor")?.(vendorId, "payout:update", {
-      VendorId: vendorId,
-      status: "paid",
-      bulk: true,
-    });
-
+    req.app.get("emitToVendor")?.(vendorId, "payout:update", { VendorId: vendorId, status: "paid", bulk: true });
     return res.json({ ok: true, affected });
   } catch (err) {
     console.error("admin/pay vendor error:", err);
@@ -954,32 +1008,23 @@ router.patch("/payouts/vendor/:vendorId/pay", authenticateToken, requireAdmin, a
   }
 });
 
-// Bulk-mark all PENDING payouts for a vendor as SCHEDULED
+// Bulk mark PENDING → SCHEDULED
 router.patch("/payouts/vendor/:vendorId/schedule", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const vendorId = Number(req.params.vendorId);
     if (!Number.isFinite(vendorId)) return res.status(400).json({ message: "Invalid vendorId" });
 
     const [affected] = await Payout.update(
-      {
-        status: "scheduled",
-        scheduledAt: Sequelize.literal(`COALESCE("scheduledAt", NOW())`),
-      },
+      { status: "scheduled", scheduledAt: Sequelize.literal(`COALESCE("scheduledAt", NOW())`) },
       { where: { VendorId: vendorId, status: "pending" } }
     );
 
-    req.app.get("emitToVendor")?.(vendorId, "payout:update", {
-      VendorId: vendorId,
-      status: "scheduled",
-      bulk: true,
-    });
-
+    req.app.get("emitToVendor")?.(vendorId, "payout:update", { VendorId: vendorId, status: "scheduled", bulk: true });
     return res.json({ ok: true, affected });
   } catch (err) {
     console.error("admin/schedule vendor error:", err);
     res.status(500).json({ message: "Failed to schedule", error: err.message });
   }
 });
-
 
 module.exports = router;
