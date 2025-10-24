@@ -907,7 +907,7 @@ router.post("/payouts/backfill", authenticateToken, requireAdmin, async (_req, r
     const paidDelivered = await Order.findAll({
       where: { status: "delivered", paymentStatus: "paid" },
       include: [{ model: Vendor, attributes: ["id", "commissionRate"] }],
-      attributes: ["id", "VendorId", "totalAmount", "commissionRate"],
+      attributes: ["id", "VendorId", "totalAmount" ],
       order: [["id", "ASC"]],
     });
 
