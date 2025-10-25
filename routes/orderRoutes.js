@@ -696,43 +696,6 @@ router.patch("/:id/cancel", authenticateToken, async (req, res) => {
 
 
 
-// REORDER (create new order with same items)
-router.post("/:id/reorder", authMiddleware, async (req, res) => {
-  try {
-    const prevOrder = await Order.findByPk(req.params.id, {
-      include: [{ model: OrderItem, include: [MenuItem] }],
-    });
-    if (!prevOrder)
-      return res.status(404).json({ message: "Previous order not found" });
-
-    const newOrder = await Order.create({
-      UserId: req.user.id,
-      VendorId: prevOrder.VendorId,
-      status: "pending",
-      totalAmount: prevOrder.totalAmount,
-      paymentMethod: "cod",
-      paymentStatus: "unpaid",
-    });
-
-    // clone items
-    const newItems = prevOrder.OrderItems.map((oi) => ({
-      OrderId: newOrder.id,
-      MenuItemId: oi.MenuItemId,
-      quantity: oi.quantity,
-      price: oi.price,
-    }));
-    await OrderItem.bulkCreate(newItems);
-
-    res.json({
-      message: "Order recreated successfully",
-      newOrderId: newOrder.id,
-    });
-  } catch (err) {
-    console.error("Reorder error:", err);
-    res.status(500).json({ message: "Failed to reorder" });
-  }
-});
-
 
 /* ===================== UPDATE (legacy/admin) ===================== */
 router.put("/:id", authenticateToken, async (req, res) => {
