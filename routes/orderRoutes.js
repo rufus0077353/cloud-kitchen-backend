@@ -695,25 +695,6 @@ router.patch("/:id/cancel", authenticateToken, async (req, res) => {
 });
 
 
-// CANCEL ORDER
-router.patch("/:id/cancel", authMiddleware, async (req, res) => {
-  try {
-    const order = await Order.findByPk(req.params.id);
-    if (!order) return res.status(404).json({ message: "Order not found" });
-
-    // allow only if pending/accepted
-    if (!["pending", "accepted"].includes(order.status)) {
-      return res.status(400).json({ message: "Order cannot be cancelled now" });
-    }
-
-    order.status = "rejected";
-    await order.save();
-    res.json(order);
-  } catch (err) {
-    console.error("Cancel order error:", err);
-    res.status(500).json({ message: "Failed to cancel order" });
-  }
-});
 
 // REORDER (create new order with same items)
 router.post("/:id/reorder", authMiddleware, async (req, res) => {
