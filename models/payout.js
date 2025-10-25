@@ -10,6 +10,8 @@ module.exports = (sequelize, DataTypes) => {
       status:           { type: DataTypes.ENUM("pending", "scheduled", "paid"), defaultValue: "pending" },
       scheduledAt:      { type: DataTypes.DATE, allowNull: true },
       paidAt:           { type: DataTypes.DATE, allowNull: true },
+      UtrNumber:        { type: DataTypes.STRING, allowNull: true },
+      paidOn:          { type: DataTypes.DATE, allowNull: true },
     },
     { tableName: "Payouts", timestamps: true }
   );
