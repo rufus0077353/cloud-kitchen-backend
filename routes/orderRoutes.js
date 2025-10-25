@@ -694,6 +694,65 @@ router.patch("/:id/cancel", authenticateToken, async (req, res) => {
   }
 });
 
+
+// CANCEL ORDER
+router.patch("/:id/cancel", authMiddleware, async (req, res) => {
+  try {
+    const order = await Order.findByPk(req.params.id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    // allow only if pending/accepted
+    if (!["pending", "accepted"].includes(order.status)) {
+      return res.status(400).json({ message: "Order cannot be cancelled now" });
+    }
+
+    order.status = "rejected";
+    await order.save();
+    res.json(order);
+  } catch (err) {
+    console.error("Cancel order error:", err);
+    res.status(500).json({ message: "Failed to cancel order" });
+  }
+});
+
+// REORDER (create new order with same items)
+router.post("/:id/reorder", authMiddleware, async (req, res) => {
+  try {
+    const prevOrder = await Order.findByPk(req.params.id, {
+      include: [{ model: OrderItem, include: [MenuItem] }],
+    });
+    if (!prevOrder)
+      return res.status(404).json({ message: "Previous order not found" });
+
+    const newOrder = await Order.create({
+      UserId: req.user.id,
+      VendorId: prevOrder.VendorId,
+      status: "pending",
+      totalAmount: prevOrder.totalAmount,
+      paymentMethod: "cod",
+      paymentStatus: "unpaid",
+    });
+
+    // clone items
+    const newItems = prevOrder.OrderItems.map((oi) => ({
+      OrderId: newOrder.id,
+      MenuItemId: oi.MenuItemId,
+      quantity: oi.quantity,
+      price: oi.price,
+    }));
+    await OrderItem.bulkCreate(newItems);
+
+    res.json({
+      message: "Order recreated successfully",
+      newOrderId: newOrder.id,
+    });
+  } catch (err) {
+    console.error("Reorder error:", err);
+    res.status(500).json({ message: "Failed to reorder" });
+  }
+});
+
+
 /* ===================== UPDATE (legacy/admin) ===================== */
 router.put("/:id", authenticateToken, async (req, res) => {
   const { id } = req.params;
