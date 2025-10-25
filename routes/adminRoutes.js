@@ -4,8 +4,9 @@ const router = express.Router();
 const bcrypt = require("bcrypt");
 const { Op, Sequelize } = require("sequelize");
 
+
 // ✅ include Payout here as well
-const { User, Vendor, Order, MenuItem, Payout } = require("../models");
+const { User, Vendor, Order, MenuItem, Payout, PayoutLog } = require("../models");
 const { authenticateToken, requireAdmin } = require("../middleware/authMiddleware");
 
 // ---------- config ----------
@@ -1037,6 +1038,13 @@ router.patch("/payouts/vendor/:vendorId/pay", authenticateToken, requireAdmin, a
       { where: { VendorId: vendorId, status: "pending" } }
     );
 
+    await PayoutLog.create({
+      VendorId: vendorId,
+      action: "paid",
+      adminUser: req.user?.email || `admin#${req.user?.id || "?"}`,
+      note: `Bulk-mark PENDING → PAID`,
+});
+
     req.app.get("emitToVendor")?.(vendorId, "payout:update", { VendorId: vendorId, status: "paid", bulk: true });
     return res.json({ ok: true, affected });
   } catch (err) {
@@ -1056,6 +1064,13 @@ router.patch("/payouts/vendor/:vendorId/schedule", authenticateToken, requireAdm
       { where: { VendorId: vendorId, status: "pending" } }
     );
 
+    await PayoutLog.create({
+      VendorId: vendorId,
+      action: "scheduled",
+      adminUser: req.user?.email || `admin#${req.user?.id || "?"}`,
+      note: `Bulk-mark PENDING → SCHEDULED`,
+});
+
     req.app.get("emitToVendor")?.(vendorId, "payout:update", { VendorId: vendorId, status: "scheduled", bulk: true });
     return res.json({ ok: true, affected });
   } catch (err) {
@@ -1063,5 +1078,105 @@ router.patch("/payouts/vendor/:vendorId/schedule", authenticateToken, requireAdm
     res.status(500).json({ message: "Failed to schedule", error: err.message });
   }
 });
+
+
+// GET /api/admin/payouts/vendor/:vendorId/details
+router.get("/payouts/vendor/:vendorId/details", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const vendorId = Number(req.params.vendorId);
+    if (!Number.isFinite(vendorId)) return res.status(400).json({ message: "Invalid vendorId" });
+
+    const vendor = await Vendor.findByPk(vendorId, { attributes: ["id","name","commissionRate"] });
+    if (!vendor) return res.status(404).json({ message: "Vendor not found" });
+
+    const payouts = await Payout.findAll({
+      where: { VendorId: vendorId },
+      order: [["createdAt","DESC"]],
+      attributes: ["id","OrderId","status","grossAmount","commissionAmount","payoutAmount","utrNumber","paidOn","scheduledAt","paidAt","createdAt"],
+    });
+
+    // include delivered+paid orders (for reconciliation)
+    const orders = await Order.findAll({
+      where: { VendorId: vendorId, status: "delivered", paymentStatus: "paid" },
+      order: [["createdAt","DESC"]],
+      attributes: ["id","totalAmount","createdAt"],
+    });
+
+    const logs = await PayoutLog.findAll({
+      where: { VendorId: vendorId },
+      order: [["createdAt","DESC"]],
+      attributes: ["id","action","adminUser","note","createdAt"],
+    });
+
+    res.json({ vendor, payouts, orders, logs });
+  } catch (e) {
+    res.status(500).json({ message: "Details fetch failed", error: e.message });
+  }
+});
+
+
+// PATCH /api/admin/payouts/vendor/:vendorId/utr
+router.patch("/payouts/vendor/:vendorId/utr", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const vendorId = Number(req.params.vendorId);
+    if (!Number.isFinite(vendorId)) return res.status(400).json({ message: "Invalid vendorId" });
+    const { utrNumber, paidOn, note } = req.body || {};
+
+    const [affected] = await Payout.update(
+      { utrNumber: utrNumber || null, paidOn: paidOn ? new Date(paidOn) : null },
+      { where: { VendorId: vendorId, status: "paid" } } // we store UTR for paid payouts
+    );
+
+    await PayoutLog.create({
+      VendorId: vendorId,
+      action: "note",
+      adminUser: req.user?.email || `admin#${req.user?.id || "?"}`,
+      note: note || `UTR updated to ${utrNumber || "-"}`,
+    });
+
+    return res.json({ ok: true, affected });
+  } catch (e) {
+    res.status(500).json({ message: "UTR update failed", error: e.message });
+  }
+});
+
+
+// GET /api/admin/payouts/vendor/:vendorId/statement?month=YYYY-MM
+router.get("/payouts/vendor/:vendorId/statement", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const vendorId = Number(req.params.vendorId);
+    const month = String(req.query.month || "").trim(); // "2025-10"
+    if (!Number.isFinite(vendorId) || !/^\d{4}-\d{2}$/.test(month)) {
+      return res.status(400).json({ message: "vendorId and month=YYYY-MM required" });
+    }
+    const [y,m] = month.split("-").map(Number);
+    const start = new Date(y, m-1, 1, 0,0,0,0);
+    const end   = new Date(y, m,   1, 0,0,0,0);
+
+    const vendor = await Vendor.findByPk(vendorId, { attributes: ["id","name"] });
+    if (!vendor) return res.status(404).json({ message: "Vendor not found" });
+
+    const rows = await Payout.findAll({
+      where: { VendorId: vendorId, createdAt: { [Op.gte]: start, [Op.lt]: end } },
+      order: [["createdAt","ASC"]],
+      attributes: ["id","OrderId","status","grossAmount","commissionAmount","payoutAmount","utrNumber","paidOn","createdAt"],
+      raw: true,
+    });
+
+    const header = ["PayoutID","OrderID","Status","Gross","PlatformFee","Net","UTR","PaidOn","CreatedAt"];
+    const lines  = rows.map(r => [
+      r.id, r.OrderId, r.status,
+      r.grossAmount?.toFixed(2), r.commissionAmount?.toFixed(2), r.payoutAmount?.toFixed(2),
+      r.utrNumber || "", r.paidOn ? new Date(r.paidOn).toISOString() : "",
+      new Date(r.createdAt).toISOString()
+    ].join(","));
+
+    res.setHeader("Content-Type","text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="statement_${vendor.name}_${month}.csv"`);
+    res.send("\uFEFF" + [header.join(","), ...lines].join("\n"));
+  } catch (e) {
+    res.status(500).json({ message: "Statement export failed", error: e.message });
+  }
+})
 
 module.exports = router;

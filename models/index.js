@@ -48,6 +48,7 @@ db.OrderItem     = loadModel("OrderItem");
 // Try common variants in case the file got named differently.
 // The FIRST match wins; still best to keep it exactly "Payout.js".
 db.Payout        = loadModel("Payout", ["payout", "Payouts", "payouts"]);
+db.PayoutLog     = loadModel("PayoutLog", ["payoutlog", "Payoutlogs", "payoutlogs"]);
 
 // Optional
 db.PushSubscription = loadModel("PushSubscription");
@@ -99,6 +100,16 @@ if (db.User && db.PushSubscription) {
 if (db.Vendor && db.Payout) {
   db.Vendor.hasMany(db.Payout, { foreignKey: "VendorId", onDelete: "CASCADE" });
   db.Payout.belongsTo(db.Vendor, { foreignKey: "VendorId" });
+}
+
+if (db.Payout && db.PayoutLog) {
+  db.Payout.hasMany(db.PayoutLog, { foreignKey: "PayoutId", onDelete: "CASCADE" });
+  db.PayoutLog.belongsTo(db.Payout, { foreignKey: "PayoutId" });
+}
+
+if (db.Vendor && db.PayoutLog) {
+  db.Vendor.hasMany(db.PayoutLog, { foreignKey: "VendorId", onDelete: "CASCADE" });
+  db.PayoutLog.belongsTo(db.Vendor, { foreignKey: "VendorId" });
 }
 
 // Order ↔ Payout (1:1)
