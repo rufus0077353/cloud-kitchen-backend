@@ -1,4 +1,3 @@
-// controllers/orderController.js
 const db = require("../models");
 const { Order, OrderItem, MenuItem, Vendor, User } = db;
 const { Op } = require("sequelize");
@@ -29,79 +28,24 @@ exports.createOrder = async (req, res) => {
   }
 };
 
-/* ---------------- My orders (user) — returns { items, total } ---------------- */
+/* ---------------- My orders (user) ---------------- */
 exports.getMyOrders = async (req, res) => {
   try {
-    const userId = req.user?.id;
-    if (!userId) return res.status(401).json({ message: "Unauthorized" });
-
-    // pagination: when page=0 (legacy) return all
-    const rawPage = String(req.query.page ?? "1");
-    const page = Math.max(0, parseInt(rawPage, 10) || 1);
-    const pageSize = Math.max(1, Math.min(100, parseInt(req.query.pageSize || "10", 10)));
-
-    const common = {
-      where: { UserId: userId },
+    const orders = await Order.findAll({
+      where: { UserId: req.user.id },
       include: [
+        // ⬇️ include commissionRate
         { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
-        // Prefer explicit OrderItems include so frontend can read quantities in a consistent shape
-        { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
+        {
+          model: MenuItem,
+          attributes: ["id", "name", "price"],
+          through: { attributes: ["quantity"] },
+        },
       ],
-      order: [
-        ["createdAt", "DESC"],
-        ["id", "DESC"],
-      ],
-      attributes: { exclude: ["updatedAt"] },
-    };
-
-    // page=0 => return all (legacy behavior used by the frontend for client-side filtering)
-    if (page === 0) {
-      const rows = await Order.findAll(common);
-      // Make sure rating fields are present (even if null)
-      const items = rows.map((o) => ({
-        id: o.id,
-        UserId: o.UserId,
-        VendorId: o.VendorId,
-        Vendor: o.Vendor,
-        status: o.status,
-        totalAmount: o.totalAmount,
-        paymentMethod: o.paymentMethod,
-        paymentStatus: o.paymentStatus,
-        createdAt: o.createdAt,
-        rating: o.rating ?? null,
-        review: o.review ?? null,
-        isRated: o.isRated ?? false,
-        OrderItems: o.OrderItems,
-      }));
-      return res.json({ items, total: items.length });
-    }
-
-    // paginated
-    const { rows, count } = await Order.findAndCountAll({
-      ...common,
-      offset: (Math.max(1, page) - 1) * pageSize,
-      limit: pageSize,
+      order: [["createdAt", "DESC"]],
     });
-
-    const items = rows.map((o) => ({
-      id: o.id,
-      UserId: o.UserId,
-      VendorId: o.VendorId,
-      Vendor: o.Vendor,
-      status: o.status,
-      totalAmount: o.totalAmount,
-      paymentMethod: o.paymentMethod,
-      paymentStatus: o.paymentStatus,
-      createdAt: o.createdAt,
-      rating: o.rating ?? null,
-      review: o.review ?? null,
-      isRated: o.isRated ?? false,
-      OrderItems: o.OrderItems,
-    }));
-
-    return res.json({ items, total: count });
+    res.json(orders);
   } catch (err) {
-    console.error("getMyOrders error:", err);
     res.status(500).json({ message: "Error fetching user orders", error: err.message });
   }
 };
@@ -116,7 +60,11 @@ exports.getVendorOrders = async (req, res) => {
       include: [
         { model: User, attributes: ["id", "name", "email"] },
         { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
-        { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
+        {
+          model: MenuItem,
+          attributes: ["id", "name", "price"],
+          through: { attributes: ["quantity"] },
+        },
       ],
       order: [["createdAt", "DESC"]],
     });
@@ -193,7 +141,7 @@ exports.deleteOrder = async (req, res) => {
 
 /* ---------------- Filter (Admin) — supports GET or POST; returns {items: []} ---------------- */
 exports.filterOrders = async (req, res) => {
-  // allow both GET (query) and POST (body)
+  // allow both GET (query) and POST (body) — matches your frontend
   const src = req.method === "GET" ? req.query : req.body;
   const { UserId, VendorId, status, startDate, endDate } = src;
 
@@ -212,12 +160,18 @@ exports.filterOrders = async (req, res) => {
       where,
       include: [
         { model: User, attributes: ["id", "name", "email"] },
+        // ⬇️ KEY: include commissionRate so the UI won’t fall back to 15%
         { model: Vendor, attributes: ["id", "name", "cuisine", "commissionRate"] },
-        { model: OrderItem, include: [{ model: MenuItem, attributes: ["id", "name", "price"] }] },
+        {
+          model: MenuItem,
+          attributes: ["id", "name", "price"],
+          through: { attributes: ["quantity"] },
+        },
       ],
       order: [["createdAt", "DESC"]],
     });
 
+    // Return in a shape the UI already accepts
     res.json({ items: orders });
   } catch (err) {
     res.status(500).json({ message: "Error filtering orders", error: err.message });
@@ -257,7 +211,11 @@ exports.getInvoice = async (req, res) => {
       include: [
         { model: User, attributes: ["name", "email"] },
         { model: Vendor, attributes: ["name", "cuisine", "commissionRate"] },
-        { model: MenuItem, attributes: ["name", "price"], through: { attributes: ["quantity"] } },
+        {
+          model: MenuItem,
+          attributes: ["name", "price"],
+          through: { attributes: ["quantity"] },
+        },
       ],
     });
 
@@ -269,7 +227,8 @@ exports.getInvoice = async (req, res) => {
       <p><strong>Vendor:</strong> ${order.Vendor.name} (${order.Vendor.cuisine})</p>
       <ul>
         ${order.MenuItems.map(
-          (item) => `<li>${item.name} (x${item.OrderItem.quantity}) - ₹${item.price}</li>`
+          (item) =>
+            `<li>${item.name} (x${item.OrderItem.quantity}) - ₹${item.price}</li>`
         ).join("")}
       </ul>
       <p><strong>Status:</strong> ${order.status}</p>
