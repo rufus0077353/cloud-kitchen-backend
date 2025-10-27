@@ -209,36 +209,30 @@ exports.updateOrderStatus = async (req, res) => {
 
 exports.rateOrder = async (req, res) => {
   try {
-    const { id } = req.params;
-    const { rating, review } = req.body;
-    const userId = req.user?.id;
+    const id = Number(req.params.id);
+    const rating = Number(req.body?.rating);
+    const review = String(req.body?.review || "").trim();
 
-    if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+    if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid order id" });
+    if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
+      return res.status(400).json({ message: "Rating must be 1–5" });
+    }
 
     const order = await db.Order.findByPk(id);
-    if (!order) return res.status(404).json({ message: 'Order not found' });
-    if (order.UserId !== userId)
-      return res.status(403).json({ message: 'You can only rate your own orders' });
-    if (order.status !== 'delivered')
-      return res.status(400).json({ message: 'You can only rate delivered orders' });
+    if (!order) return res.status(404).json({ message: "Order not found" });
 
-    // simple validation 1..5
-    const n = Number(rating);
-    if (!Number.isFinite(n) || n < 1 || n > 5)
-      return res.status(400).json({ message: 'Rating must be 1–5' });
+    // only the owner can rate
+    if (Number(order.UserId) !== Number(req.user?.id)) {
+      return res.status(403).json({ message: "Not your order" });
+    }
 
-    order.rating = n;
-    order.review = review ?? null;
-    order.isRated = true;
+    order.rating = rating;
+    order.review = review || null;
     await order.save();
 
-    return res.json({
-      message: 'Order rated successfully',
-      order: { id: order.id, rating: order.rating, review: order.review, isRated: order.isRated }
-    });
+    res.json({ message: "Rated successfully", order });
   } catch (err) {
-    console.error('rateOrder error:', err);
-    return res.status(500).json({ message: 'Error rating order', error: err.message });
+    res.status(500).json({ message: "Failed to rate order", error: err.message });
   }
 };
 
