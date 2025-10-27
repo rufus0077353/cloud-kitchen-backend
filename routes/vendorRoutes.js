@@ -100,6 +100,72 @@ router.get("/me", authenticateToken, requireVendor, async (req, res) => {
   }
 });
 
+// --- Ratings histogram & recent reviews for the logged-in vendor ---
+// GET /api/vendors/me/ratings/histogram
+router.get("/me/ratings/histogram", authenticateToken, requireVendor, async (req, res) => {
+  try {
+    const v = await getOrCreateVendorForUser(req.user.id);
+    if (!v) return res.status(404).json({ message: "Vendor not found" });
+
+    // bucketize 1..5 stars (integers). If you allow half-stars, floor them.
+    const rows = await Order.findAll({
+      where: { VendorId: v.id, rating: { [Op.ne]: null } },
+      attributes: ["rating"],
+      raw: true,
+    });
+
+    const buckets = { 1:0, 2:0, 3:0, 4:0, 5:0 };
+    for (const r of rows) {
+      const star = Math.max(1, Math.min(5, Math.round(Number(r.rating) || 0)));
+      buckets[star] = (buckets[star] || 0) + 1;
+    }
+    const total = rows.length || 0;
+    const avg = total ? (rows.reduce((s, r) => s + Number(r.rating || 0), 0) / total) : 0;
+
+    return res.json({
+      vendorId: v.id,
+      total,
+      avg: Number(avg.toFixed(2)),
+      histogram: buckets, // {1: n, 2: n, 3: n, 4: n, 5: n}
+    });
+  } catch (err) {
+    return res.status(500).json({ message: "Failed to load rating histogram", error: err.message });
+  }
+});
+
+// GET /api/vendors/me/reviews?limit=20
+router.get("/me/reviews", authenticateToken, requireVendor, async (req, res) => {
+  try {
+    const v = await getOrCreateVendorForUser(req.user.id);
+    if (!v) return res.status(404).json({ message: "Vendor not found" });
+
+    const limit = Math.max(parseInt(req.query.limit || "20", 10), 1);
+
+    const reviews = await Order.findAll({
+      where: { VendorId: v.id, rating: { [Op.ne]: null } },
+      include: [
+        { model: User, attributes: ["id", "name", "email"] },
+      ],
+      attributes: ["id", "rating", "review", "reviewedAt", "createdAt"],
+      order: [["reviewedAt", "DESC"], ["updatedAt", "DESC"]],
+      limit,
+    });
+
+    // Map to a compact payload
+    const items = reviews.map((o) => ({
+      orderId: o.id,
+      rating: o.rating,
+      review: o.review,
+      reviewedAt: o.reviewedAt || o.updatedAt || o.createdAt,
+      user: o.User ? { id: o.User.id, name: o.User.name, email: o.User.email } : null,
+    }));
+
+    return res.json({ vendorId: v.id, items });
+  } catch (err) {
+    return res.status(500).json({ message: "Failed to load reviews", error: err.message });
+  }
+});
+
 /* ============== TOGGLE OPEN/CLOSED ============== */
 router.patch("/me/open", authenticateToken, requireVendor, async (req, res) => {
   try {
