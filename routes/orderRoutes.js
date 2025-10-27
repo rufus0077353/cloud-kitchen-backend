@@ -1270,31 +1270,54 @@ router.get("/:id", authenticateToken, async (req, res) => {
 });
 
 
-// PATCH /api/orders/:id/rate
 
 // PATCH /api/orders/:id/rate
-router.patch("/:id/rate", authenticateToken, async (req, res) => {
-  try {
-    const orderId = Number(req.params.id);
-    const { rating, review } = req.body;
+router.patch(
+  "/:id/rate",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { rating, review } = req.body;
 
-    if (!orderId) return res.status(400).json({ message: "Invalid order ID" });
-    if (!rating || rating < 1 || rating > 5)
-      return res.status(400).json({ message: "Rating must be between 1 and 5" });
+      if (!rating || Number(rating) < 1 || Number(rating) > 5) {
+        return res.status(400).json({ message: "Rating must be between 1 and 5" });
+      }
 
-    const order = await db.Order.findByPk(orderId);
-    if (!order) return res.status(404).json({ message: "Order not found" });
+      const order = await db.Order.findByPk(id);
+      if (!order) {
+        return res.status(404).json({ message: "Order not found" });
+      }
 
-    order.rating = rating;
-    order.review = review || null;
-    await order.save();
+      // Prevent re-rating
+      if (order.rating) {
+        return res.status(400).json({ message: "Order already rated" });
+      }
 
-    return res.json({ message: "Rating saved", order });
-  } catch (err) {
-    console.error("Rate order error:", err);
-    res.status(500).json({ message: "Failed to rate order", error: err.message });
+      // Ensure user owns the order
+      if (order.UserId !== req.user.id) {
+        return res.status(403).json({ message: "Not your order" });
+      }
+
+      order.rating = Number(rating);
+      order.review = review || null;
+      order.ratedAt = new Date();
+      await order.save();
+
+      res.json({
+        message: "Rating saved successfully",
+        rating: order.rating,
+        review: order.review,
+        ratedAt: order.ratedAt,
+      });
+    } catch (err) {
+      res.status(500).json({
+        message: "Failed to rate order",
+        error: err.message,
+      });
+    }
   }
-});
+);
 /* ===================== DEBUG: SCAN VENDORS ===================== */
 router.get(
   "/vendor/debug/scan",
