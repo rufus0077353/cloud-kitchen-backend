@@ -17,6 +17,7 @@ const { authenticateToken, requireVendor } = require("../middleware/authMiddlewa
 const ensureVendorProfile = require("../middleware/ensureVendorProfile");
 const sequelize = Order.sequelize;
 const { notifyUser } = require("../utils/notifications");
+const db = require("../models");
 
 // ---- OPTIONAL puppeteer (for PDF invoices). Safe if not installed.
 let Puppeteer = null;
