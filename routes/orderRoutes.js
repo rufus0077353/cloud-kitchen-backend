@@ -725,63 +725,94 @@ router.put("/:id", authenticateToken, async (req, res) => {
 });
 
 // ===================== UPDATE STATUS (admin OR owning vendor) =====================
+// PATCH /orders/:id/status
 router.patch("/:id/status", authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const statusRaw = String(req.body?.status || "").toLowerCase();
 
-    const allowed = ["pending", "accepted", "rejected", "ready", "delivered"];
-    if (!allowed.includes(statusRaw)) {
+    // allow-list to prevent bad writes
+    const ALLOWED = ["pending", "accepted", "rejected", "ready", "delivered"];
+    if (!ALLOWED.includes(statusRaw)) {
       return res.status(400).json({ message: "Invalid status" });
     }
 
+    // load order with vendor (for commission fallback)
     const order = await Order.findByPk(id, { include: [{ model: Vendor }] });
     if (!order) return res.status(404).json({ message: "Order not found" });
 
+    // ---- authorization (admin OR vendor who owns this vendor) ----
     const role = String(req.user?.role || "").toLowerCase();
-
     let isOwnerVendor = false;
+
     if (role === "vendor") {
       try {
-        const vendorIds = await Vendor.findAll({
+        const ids = await Vendor.findAll({
           where: { UserId: req.user.id },
           attributes: ["id"],
           raw: true,
-        }).then((rows) => rows.map((r) => Number(r.id)));
-
-        isOwnerVendor = vendorIds.includes(Number(order.VendorId));
-      } catch {}
+        });
+        const myVendorIds = ids.map(r => Number(r.id)).filter(Number.isFinite);
+        isOwnerVendor = myVendorIds.includes(Number(order.VendorId));
+      } catch {
+        isOwnerVendor = false;
+      }
     }
-
     const isAdmin = role === "admin";
     if (!(isAdmin || isOwnerVendor)) {
       return res.status(403).json({ message: "Not authorized to update this order" });
     }
 
+    // ---- persist status ----
     order.status = statusRaw;
     await order.save();
 
-    emitToVendorHelper(req, order.VendorId, "order:status", { id: order.id, status: order.status });
-    emitToUserHelper(req, order.UserId, "order:status", { id: order.id, status: order.status, UserId: order.UserId });
+    // ---- emit socket updates (guarded) ----
+    const emitToVendor = req.app?.get("emitToVendor");
+    const emitToUser   = req.app?.get("emitToUser");
 
+    if (typeof emitToVendor === "function" && order.VendorId) {
+      emitToVendor(order.VendorId, "order:status", { id: order.id, status: order.status });
+    }
+    if (typeof emitToUser === "function" && order.UserId) {
+      emitToUser(order.UserId, "order:status", {
+        id: order.id,
+        status: order.status,
+        UserId: order.UserId,
+      });
+    }
+
+    // ---- push notification (best-effort) ----
     try {
       const title = `Order #${order.id} is ${order.status}`;
-      const body = isAdmin ? "Admin updated your order." : "Vendor updated your order.";
-      await notifyUser(order.UserId, { title, body, url: `/orders`, tag: `order-${order.id}` });
+      const body  = isAdmin ? "Admin updated your order." : "Vendor updated your order.";
+      if (typeof notifyUser === "function") {
+        await notifyUser(order.UserId, { title, body, url: `/orders`, tag: `order-${order.id}` });
+      }
     } catch (e) {
       console.warn("push notify failed:", e?.message);
     }
 
-    // materialize payout when delivered & paid
-    if (statusRaw === "delivered" && order.paymentStatus === "paid" && Payout?.upsert) {
+    // ---- payout materialization only when delivered & paid ----
+    const hasPayoutModel = typeof Payout?.upsert === "function";
+    const paid = String(order.paymentStatus || "").toLowerCase() === "paid";
+
+    if (statusRaw === "delivered" && paid && hasPayoutModel) {
       const gross = Number(order.totalAmount || 0);
+
+      // commission rate fallbacks: order.commissionRate -> vendor.commissionRate -> env -> 0.15
+      const rateEnv =
+        Number.isFinite(Number(process.env.PLATFORM_RATE))
+          ? Number(process.env.PLATFORM_RATE)
+          : Number(process.env.COMMISSION_PCT) || 0.15;
+
       const rate =
         (order.commissionRate != null ? Number(order.commissionRate) : null) ??
         (order.Vendor?.commissionRate != null ? Number(order.Vendor.commissionRate) : null) ??
-        Number(process.env.PLATFORM_RATE || 0.15);
+        rateEnv;
 
       const commission = Math.max(0, gross * (Number.isFinite(rate) ? rate : 0.15));
-      const payout = Math.max(0, gross - commission);
+      const payout     = Math.max(0, gross - commission);
 
       await Payout.upsert({
         OrderId: order.id,
@@ -792,19 +823,28 @@ router.patch("/:id/status", authenticateToken, async (req, res) => {
         status: "pending",
       });
 
-      req.app.get("emitToVendor")?.(order.VendorId, "payout:update", {
-        orderId: order.id,
-        VendorId: order.VendorId,
-        payoutAmount: payout,
-        status: "pending",
-      });
+      if (typeof emitToVendor === "function" && order.VendorId) {
+        emitToVendor(order.VendorId, "payout:update", {
+          orderId: order.id,
+          VendorId: order.VendorId,
+          payoutAmount: payout,
+          status: "pending",
+        });
+      }
     }
 
-    await audit(req, {
-      action: "ORDER_STATUS_UPDATE",
-      order,
-      details: { by: isAdmin ? "admin" : "vendor", status: statusRaw },
-    });
+    // ---- audit (best-effort) ----
+    try {
+      if (typeof audit === "function") {
+        await audit(req, {
+          action: "ORDER_STATUS_UPDATE",
+          order,
+          details: { by: isAdmin ? "admin" : "vendor", status: statusRaw },
+        });
+      }
+    } catch (e) {
+      console.warn("audit failed:", e?.message);
+    }
 
     return res.json({ message: "Status updated", order });
   } catch (err) {
