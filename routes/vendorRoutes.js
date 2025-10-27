@@ -456,6 +456,8 @@ router.delete(
 
 /* ======================== PAYOUTS SUMMARY ======================== */
 // Returns: { vendorId, paidOrders, grossPaid, commission, netOwed }
+
+// GET /api/vendors/:id/payouts?from=2025-10-01&to=2025-10-31
 router.get("/:id/payouts", authenticateToken, requireVendor, async (req, res) => {
   const t = await Vendor.sequelize.transaction();
   try {
@@ -465,24 +467,126 @@ router.get("/:id/payouts", authenticateToken, requireVendor, async (req, res) =>
       return res.status(400).json({ message: "Invalid vendor id" });
     }
 
-    // ensure this vendor belongs to the authed user
+    // ---- Ownership check (this authed user must own this vendor)
     const myIds = (
       await Vendor.findAll({
         where: { UserId: req.user.id },
         attributes: ["id"],
         transaction: t,
       })
-    ).map((v) => v.id);
+    ).map(v => Number(v.id));
+
     if (!myIds.includes(idNum)) {
       await t.rollback();
       return res.status(403).json({ message: "Not your vendor" });
     }
 
+    // ---- Date range (optional)
+    const { from, to } = req.query || {};
+    const rangeWhere = {};
+    if (from || to) {
+      rangeWhere.createdAt = {};
+      if (from) rangeWhere.createdAt[Op.gte] = new Date(from);
+      if (to)   rangeWhere.createdAt[Op.lte] = new Date(to);
+    }
+
+    // =========================
+    // 1) Try from Payouts (preferred)
+    // =========================
+    let usedSource = "payouts";
+    let result = {
+      vendorId: idNum,
+      range: { from: from || null, to: to || null },
+      paidOrders: 0,
+      grossPaid: 0,
+      commission: 0,
+      netOwed: 0,
+      payouts: {  // breakdown from Payouts table
+        pendingCount: 0,
+        pendingTotal: 0,
+        paidCount: 0,
+        paidTotal: 0,
+      },
+      source: "payouts",
+    };
+
+    const hasPayoutModel =
+      !!Payout && typeof Payout.findAll === "function" && Payout.sequelize;
+
+    if (hasPayoutModel) {
+      const rows = await Payout.findAll({
+        where: { VendorId: idNum, ...rangeWhere },
+        attributes: [
+          "status",
+          [Vendor.sequelize.fn("COUNT", Vendor.sequelize.col("id")), "count"],
+          [Vendor.sequelize.fn("SUM", Vendor.sequelize.col("grossAmount")), "gross"],
+          [Vendor.sequelize.fn("SUM", Vendor.sequelize.col("commissionAmount")), "commission"],
+          [Vendor.sequelize.fn("SUM", Vendor.sequelize.col("payoutAmount")), "payout"],
+        ],
+        group: ["status"],
+        transaction: t,
+        raw: true,
+      });
+
+      let grossPaid = 0, commission = 0, net = 0, paidOrders = 0;
+      let pendingCount = 0, pendingTotal = 0, paidCount = 0, paidTotal = 0;
+
+      for (const r of rows) {
+        const st = String(r.status || "").toLowerCase();
+        const g = Number(r.gross || 0);
+        const c = Number(r.commission || 0);
+        const p = Number(r.payout || 0);
+        const cnt = Number(r.count || 0);
+
+        if (st === "paid" || st === "completed" || st === "settled") {
+          paidOrders += cnt;
+          grossPaid += g;
+          commission += c;
+          net += p;
+          paidCount += cnt;
+          paidTotal += p;
+        } else if (st === "pending" || st === "queued") {
+          pendingCount += cnt;
+          pendingTotal += p;
+        } else {
+          // treat unknown statuses as pending for safety
+          pendingCount += cnt;
+          pendingTotal += p;
+        }
+      }
+
+      if ((rows && rows.length) || paidOrders > 0 || pendingCount > 0) {
+        await t.commit();
+        return res.json({
+          ...result,
+          paidOrders,
+          grossPaid: +grossPaid.toFixed(2),
+          commission: +commission.toFixed(2),
+          netOwed: +net.toFixed(2),
+          payouts: {
+            pendingCount,
+            pendingTotal: +pendingTotal.toFixed(2),
+            paidCount,
+            paidTotal: +paidTotal.toFixed(2),
+          },
+          source: "payouts",
+        });
+      }
+      // else fall back to Orders computation below
+      usedSource = "orders-fallback";
+    } else {
+      usedSource = "orders-fallback";
+    }
+
+    // =========================
+    // 2) Fallback: compute from Orders + OrderItems
+    // =========================
     const DONE = ["delivered", "completed", "paid"];
 
     const orders = await Order.findAll({
-      where: { VendorId: idNum },
+      where: { VendorId: idNum, ...rangeWhere },
       include: [
+        { model: Vendor, attributes: ["commissionRate"] },
         {
           model: OrderItem,
           required: false,
@@ -494,12 +598,14 @@ router.get("/:id/payouts", authenticateToken, requireVendor, async (req, res) =>
 
     let paidOrders = 0;
     let grossPaid = 0;
+    let commission = 0;
 
     for (const o of orders) {
       const hasStatus = Object.prototype.hasOwnProperty.call(o.dataValues, "status");
       const ok = !hasStatus || (o.status && DONE.includes(String(o.status).toLowerCase()));
       if (!ok) continue;
 
+      // line-items sum
       const items = Array.isArray(o.OrderItems) ? o.OrderItems : [];
       let fromLines = 0;
       for (const it of items) {
@@ -507,6 +613,8 @@ router.get("/:id/payouts", authenticateToken, requireVendor, async (req, res) =>
         const price = Number(it?.MenuItem?.price ?? it?.price ?? 0) || 0;
         fromLines += qty * price;
       }
+
+      // order total fallbacks
       let orderAmount = fromLines;
       if (orderAmount === 0 && Object.prototype.hasOwnProperty.call(o.dataValues, "totalAmount")) {
         orderAmount = Number(o.totalAmount || 0);
@@ -520,31 +628,71 @@ router.get("/:id/payouts", authenticateToken, requireVendor, async (req, res) =>
 
       grossPaid += orderAmount;
       paidOrders += 1;
+
+      // commission precedence
+      const envRate = Number(process.env.COMMISSION_PCT || 0.15);
+      const vendorRate = o?.Vendor?.commissionRate != null ? Number(o.Vendor.commissionRate) : null;
+      const orderRate = o?.commissionRate != null ? Number(o.commissionRate) : null;
+      const rate = Number.isFinite(orderRate)
+        ? orderRate
+        : Number.isFinite(vendorRate)
+          ? vendorRate
+          : envRate;
+
+      commission += orderAmount * (Number.isFinite(rate) ? rate : envRate);
     }
 
-    const COMMISSION_PCT = Number(process.env.COMMISSION_PCT || 0.15);
-    const commission = +(grossPaid * COMMISSION_PCT).toFixed(2);
-    const netOwed = +(grossPaid - commission).toFixed(2);
+    const netOwed = Math.max(0, grossPaid - commission);
 
     await t.commit();
     return res.json({
       vendorId: idNum,
+      range: { from: from || null, to: to || null },
       paidOrders,
       grossPaid: +grossPaid.toFixed(2),
-      commission,
-      netOwed,
+      commission: +commission.toFixed(2),
+      netOwed: +netOwed.toFixed(2),
+      payouts: { pendingCount: 0, pendingTotal: 0, paidCount: paidOrders, paidTotal: +netOwed.toFixed(2) },
+      source: usedSource, // "orders-fallback" if Payouts not used
     });
   } catch (e) {
-    try {
-      await t.rollback();
-    } catch {}
+    try { await t.rollback(); } catch {}
+    // Return a safe payload (avoid breaking the dashboard)
     return res.status(200).json({
       vendorId: Number(req.params.id) || null,
+      range: { from: req.query?.from || null, to: req.query?.to || null },
       paidOrders: 0,
       grossPaid: 0,
       commission: 0,
       netOwed: 0,
+      payouts: { pendingCount: 0, pendingTotal: 0, paidCount: 0, paidTotal: 0 },
+      source: "error-fallback",
       _warning: "Payouts summary fallback used: " + (e?.message || "unknown error"),
+    });
+  }
+});
+
+/* ===================== ALIAS: /orders/payouts/summary ===================== */
+// Allows frontend (VendorDashboard) to fetch payouts without changing URL
+// It automatically finds the vendor linked to the logged-in user
+router.get("/me/payouts/summary", authenticateToken, requireVendor, async (req, res) => {
+  try {
+    const v = await Vendor.findOne({ where: { UserId: req.user.id } });
+    if (!v) return res.status(404).json({ message: "Vendor not found for this user" });
+
+    // Internally call the vendor payouts logic for this vendor ID
+    const url = `${req.protocol}://${req.get("host")}/api/vendors/${v.id}/payouts`;
+    const r = await fetch(url, {
+      headers: { Authorization: req.headers.authorization || "" },
+    });
+    const data = await r.json();
+
+    return res.status(r.status).json(data);
+  } catch (err) {
+    console.error("me/payouts/summary error:", err);
+    return res.status(500).json({
+      message: "Failed to load vendor payout summary",
+      error: err.message,
     });
   }
 });
