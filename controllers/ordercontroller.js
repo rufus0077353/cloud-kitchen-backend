@@ -204,6 +204,44 @@ exports.updateOrderStatus = async (req, res) => {
   }
 };
 
+
+/* ---------------- Rate order ---------------- */
+exports.rateOrder = async (req, res) => {
+  try {
+    const { id } = req.params; // order ID
+    const { rating, review } = req.body;
+    const userId = req.user?.id;
+
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
+
+    const order = await Order.findByPk(id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+    if (order.UserId !== userId)
+      return res.status(403).json({ message: "You can only rate your own orders" });
+    if (order.status !== "delivered")
+      return res.status(400).json({ message: "You can only rate delivered orders" });
+
+    // Update rating fields
+    order.rating = rating ?? null;
+    order.review = review ?? null;
+    order.isRated = true;
+    await order.save();
+
+    return res.json({
+      message: "Order rated successfully",
+      order: {
+        id: order.id,
+        rating: order.rating,
+        review: order.review,
+        isRated: order.isRated,
+      },
+    });
+  } catch (err) {
+    console.error("rateOrder error:", err);
+    res.status(500).json({ message: "Error rating order", error: err.message });
+  }
+};
+
 /* ---------------- Invoice ---------------- */
 exports.getInvoice = async (req, res) => {
   try {
