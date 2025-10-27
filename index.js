@@ -29,8 +29,7 @@ const DEFAULT_ORIGINS = [
 
 const FRONTENDS_LIST = (process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(",")
-  : DEFAULT_ORIGINS
-)
+  : DEFAULT_ORIGINS)
   .map((s) => s.trim())
   .filter(Boolean);
 
@@ -38,7 +37,7 @@ const DEV_ALLOW_ALL =
   String(process.env.DEV_ALLOW_ALL_CORS || "").toLowerCase() === "true";
 
 const isAllowedOrigin = (origin) => {
-  if (!origin) return true; // Expo sends no origin sometimes
+  if (!origin) return true; // some clients send no origin
   if (DEV_ALLOW_ALL) return true;
   if (FRONTENDS_LIST.includes(origin)) return true;
   try {
@@ -131,9 +130,7 @@ io.on("connection", (socket) => {
 
   socket.on("vendor:join", (vendorId) => vendorId && socket.join(`vendor:${vendorId}`));
   socket.on("user:join", (userId) => userId && socket.join(`user:${userId}`));
-  socket.on("disconnect", (reason) =>
-    console.log("🔌 socket disconnected:", reason)
-  );
+  socket.on("disconnect", (reason) => console.log("🔌 socket disconnected:", reason));
 });
 
 /* =========================
@@ -223,11 +220,14 @@ if (paymentsRouter) mountWithEmit("/api/payments", paymentsRouter);
 ========================= */
 app.get("/public-key", (_req, res) => res.json({ publicKey: VAPID_PUBLIC_KEY || "" }));
 app.get("/ping", (_req, res) => res.send("pong"));
-app.get("/healthz", (_req, res) => res.status(200).send("ok"));
-app.get("/api/healthz", (_req, res) => res.json({ ok: true, ts: Date.now() }));
-app.get("/", (_req, res) => res.send("✅ Cloud Kitchen Backend is live!"));
 
-// Debug routes
+// Add both names so curl tests & uptime pings work everywhere
+app.get("/health", (_req, res) => res.status(200).send("ok"));
+app.get("/healthz", (_req, res) => res.status(200).send("ok"));
+app.get("/api/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
+app.get("/api/healthz", (_req, res) => res.json({ ok: true, ts: Date.now() }));
+
+app.get("/", (_req, res) => res.send("✅ Cloud Kitchen Backend is live!"));
 app.use("/api/debug", debugRoutes);
 
 /* =========================
@@ -275,7 +275,11 @@ async function ensureTimestamps(tableName) {
    SERVER STARTUP
 ========================= */
 const PORT = process.env.PORT || 5000;
-const HOST = process.env.HOST || "0.0.0.0";
+// On Windows, binding to 127.0.0.1 avoids localhost/0.0.0.0 quirks.
+// You can override with HOST in .env (e.g., HOST=0.0.0.0 for Docker/Render).
+const HOST =
+  process.env.HOST ||
+  (process.platform === "win32" ? "127.0.0.1" : "0.0.0.0");
 
 server.keepAliveTimeout = 65000;
 server.headersTimeout = 66000;
