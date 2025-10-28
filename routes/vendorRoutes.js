@@ -136,78 +136,84 @@ router.get("/me/ratings/histogram", authenticateToken, requireVendor, async (req
 
 // GET /api/vendors/me/reviews?limit=20
 
+// helpers
+const pickExistingField = (model, candidates = []) => {
+  const attrs = model?.rawAttributes ? Object.keys(model.rawAttributes) : [];
+  return candidates.find((c) => attrs.includes(c)) || null;
+};
 
-// GET /api/vendors/me/reviews
 router.get("/me/reviews", authenticateToken, requireVendor, async (req, res) => {
   try {
-    const v = await getOrCreateVendorForUser(req.user.id);
-    if (!v) return res.status(404).json({ message: "Vendor not found" });
+    // Vendors owned by this user (handles multi-vendor accounts)
+    const myVendors = await Vendor.findAll({ where: { UserId: req.user.id }, attributes: ["id"] });
+    const vendorIds = myVendors.map(v => Number(v.id)).filter(Number.isFinite);
+    if (!vendorIds.length) return res.status(404).json({ message: "Vendor not found" });
 
     const limit = Math.max(parseInt(req.query.limit || "20", 10), 1);
 
-    // ---------- 1) Try pulling reviews from Orders ----------
-    const whereFromOrders = {
-      VendorId: v.id,
-      [Op.or]: [
-        { rating: { [Op.ne]: null } },
-        { review: { [Op.ne]: null } },
-      ],
-    };
+    // Detect fields on Order
+    const orderRatingField = pickExistingField(Order, ["rating", "ratings", "stars", "star", "score"]);
+    const orderReviewField = pickExistingField(Order, ["review", "comment", "feedback", "text"]);
+    const orderReplyField  = pickExistingField(Order, ["reviewReply", "vendorReply", "reply"]);
+    const hasReviewedAt    = !!(Order?.rawAttributes && Order.rawAttributes.reviewedAt);
 
-    const orderAttrs = [
-      "id",
-      "rating",
-      "review",
-      "reviewedAt",
-      "createdAt",
-      "updatedAt",
-      ...(Order?.rawAttributes?.reviewReply ? ["reviewReply"] : []),
-      ...(Order?.rawAttributes?.vendorReply ? ["vendorReply"] : []),
-      ...(Order?.rawAttributes?.reply ? ["reply"] : []),
-    ];
+    let items = [];
 
-    let fromOrders = await Order.findAll({
-      where: whereFromOrders,
-      include: [{ model: User, attributes: ["id", "name", "email"] }],
-      attributes: orderAttrs,
-      order: [
-        [db.sequelize.literal(`COALESCE("Order"."reviewedAt","Order"."updatedAt","Order"."createdAt")`), "DESC"],
-      ],
-      limit,
-    });
-
-    const mapOrderReview = (o) => {
-      let reply = null;
-      try {
-        reply =
-          o.get?.("reviewReply") ??
-          o.get?.("vendorReply") ??
-          o.get?.("reply") ??
-          null;
-      } catch {}
-      return {
-        source: "order",
-        orderId: o.id,
-        rating: (o.rating != null ? Number(o.rating) : null),
-        review: o.review ?? null,
-        reply,
-        reviewedAt: o.reviewedAt || o.updatedAt || o.createdAt,
-        user: o.User ? { id: o.User.id, name: o.User.name, email: o.User.email } : null,
+    // Try reviews on Order
+    if (orderRatingField || orderReviewField) {
+      const whereOrder = {
+        VendorId: { [Op.in]: vendorIds },
+        [Op.or]: [
+          ...(orderRatingField ? [{ [orderRatingField]: { [Op.ne]: null } }] : []),
+          ...(orderReviewField ? [{ [orderReviewField]: { [Op.ne]: null } }] : []),
+        ],
       };
-    };
 
-    let items = Array.isArray(fromOrders) ? fromOrders.map(mapOrderReview) : [];
+      const orderAttrs = [
+        "id", "createdAt", "updatedAt",
+        ...(hasReviewedAt ? ["reviewedAt"] : []),
+        ...(orderRatingField ? [orderRatingField] : []),
+        ...(orderReviewField ? [orderReviewField] : []),
+        ...(orderReplyField ? [orderReplyField] : []),
+      ];
 
-    // ---------- 2) Fallback: try per-item reviews on OrderItems ----------
-    if (items.length === 0) {
-      // If your schema has item-level ratings/reviews, we’ll surface them.
-      const itemWhere = { VendorId: v.id };
-      const hasItemRating = !!OrderItem?.rawAttributes?.rating;
-      const hasItemReview = !!OrderItem?.rawAttributes?.review;
+      // Build safe ORDER BY (no reviewedAt if column doesn’t exist)
+      const orderExpr = hasReviewedAt
+        ? `COALESCE("Order"."reviewedAt","Order"."updatedAt","Order"."createdAt")`
+        : `COALESCE("Order"."updatedAt","Order"."createdAt")`;
 
-      if (hasItemRating || hasItemReview) {
-        const oi = await Order.findAll({
-          where: { VendorId: v.id },
+      const fromOrders = await Order.findAll({
+        where: whereOrder,
+        include: [{ model: User, attributes: ["id", "name", "email"] }],
+        attributes: orderAttrs,
+        order: [[db.sequelize.literal(orderExpr), "DESC"]],
+        limit,
+      });
+
+      items = (fromOrders || []).map((o) => {
+        const ratingVal = orderRatingField ? o[orderRatingField] : null;
+        const reviewVal = orderReviewField ? o[orderReviewField] : null;
+        const replyVal  = orderReplyField  ? o[orderReplyField]  : null;
+        return {
+          source: "order",
+          orderId: o.id,
+          rating: ratingVal != null ? Number(ratingVal) : null,
+          review: reviewVal ?? null,
+          reply:  replyVal  ?? null,
+          reviewedAt: hasReviewedAt ? (o.reviewedAt || o.updatedAt || o.createdAt) : (o.updatedAt || o.createdAt),
+          user: o.User ? { id: o.User.id, name: o.User.name, email: o.User.email } : null,
+        };
+      });
+    }
+
+    // Fallback to per-item reviews on OrderItem if nothing found on Order
+    if (!items.length) {
+      const oiRatingField = pickExistingField(OrderItem, ["rating", "ratings", "stars", "star", "score"]);
+      const oiReviewField = pickExistingField(OrderItem, ["review", "comment", "feedback", "text"]);
+
+      if (oiRatingField || oiReviewField) {
+        const orders = await Order.findAll({
+          where: { VendorId: { [Op.in]: vendorIds } },
           include: [
             { model: User, attributes: ["id", "name", "email"] },
             {
@@ -215,59 +221,54 @@ router.get("/me/reviews", authenticateToken, requireVendor, async (req, res) => 
               required: true,
               where: {
                 [Op.or]: [
-                  ...(hasItemRating ? [{ rating: { [Op.ne]: null } }] : []),
-                  ...(hasItemReview ? [{ review: { [Op.ne]: null } }] : []),
+                  ...(oiRatingField ? [{ [oiRatingField]: { [Op.ne]: null } }] : []),
+                  ...(oiReviewField ? [{ [oiReviewField]: { [Op.ne]: null } }] : []),
                 ],
               },
               include: [{ model: MenuItem, attributes: ["id", "name"] }],
               attributes: [
-                "id",
-                ...(hasItemRating ? ["rating"] : []),
-                ...(hasItemReview ? ["review"] : []),
-                "createdAt",
-                "updatedAt",
+                "id", "createdAt", "updatedAt",
+                ...(oiRatingField ? [oiRatingField] : []),
+                ...(oiReviewField ? [oiReviewField] : []),
               ],
             },
           ],
           order: [["updatedAt", "DESC"]],
-          limit, // limit total orders; we’ll flatten below
+          limit,
         });
 
-        const flattened = [];
-        for (const o of oi) {
-          const baseUser = o.User ? { id: o.User.id, name: o.User.name, email: o.User.email } : null;
+        const flat = [];
+        for (const o of orders) {
           const when = o.updatedAt || o.createdAt;
+          const baseUser = o.User ? { id: o.User.id, name: o.User.name, email: o.User.email } : null;
           for (const it of (o.OrderItems || [])) {
-            const anyRating = hasItemRating ? it.rating : null;
-            const anyReview = hasItemReview ? it.review : null;
-            if (anyRating == null && (anyReview == null || anyReview === "")) continue;
-            flattened.push({
+            const rVal = oiRatingField ? it[oiRatingField] : null;
+            const tVal = oiReviewField ? it[oiReviewField] : null;
+            if (rVal == null && (tVal == null || tVal === "")) continue;
+            flat.push({
               source: "orderItem",
               orderId: o.id,
               orderItemId: it.id,
               item: it.MenuItem ? { id: it.MenuItem.id, name: it.MenuItem.name } : null,
-              rating: (anyRating != null ? Number(anyRating) : null),
-              review: anyReview ?? null,
+              rating: rVal != null ? Number(rVal) : null,
+              review: tVal ?? null,
               reply: null,
               reviewedAt: when,
               user: baseUser,
             });
           }
         }
-
-        // Sort newest first and respect the same limit
-        flattened.sort((a, b) => new Date(b.reviewedAt) - new Date(a.reviewedAt));
-        items = flattened.slice(0, limit);
+        flat.sort((a, b) => new Date(b.reviewedAt) - new Date(a.reviewedAt));
+        items = flat.slice(0, limit);
       }
     }
 
-    return res.json({ vendorId: v.id, items });
+    return res.json({ vendorIds, items });
   } catch (err) {
     console.error("❌ /me/reviews error:", err);
-    return res.status(500).json({ message: "Failed to load reviews", error: err.message });
+    return res.status(200).json({ vendorIds: [], items: [], _warning: err.message || "unknown" });
   }
 });
-
 
 // GET /api/vendors/me/reviews/debug
 router.get("/me/reviews/debug", authenticateToken, requireVendor, async (req, res) => {
