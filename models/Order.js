@@ -88,6 +88,10 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: false,
       },
+      reviewReply: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+      },
 
       /* timestamps */
       createdAt: {
