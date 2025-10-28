@@ -142,46 +142,110 @@ router.get("/me/reviews", authenticateToken, requireVendor, async (req, res) => 
 
     const limit = Math.max(parseInt(req.query.limit || "20", 10), 1);
 
-    // Don't reference columns that may not exist in WHERE/ORDER.
-    // Fetch recent orders and filter/normalize in JS to avoid DB 500s.
-    const rows = await Order.findAll({
-      where: { VendorId: v.id },
+    const reviews = await Order.findAll({
+      where: { VendorId: v.id, rating: { [Op.ne]: null } },
       include: [{ model: User, attributes: ["id", "name", "email"] }],
-      order: [["updatedAt", "DESC"], ["createdAt", "DESC"]],
-      limit: Math.max(limit, 50), // pull a few extra, then trim
+      // reply fields are optional — we’ll read whichever exists
+      attributes: [
+        "id", "rating", "review", "reviewedAt", "createdAt", "updatedAt",
+        // optional columns if present in your schema:
+        "reviewReply", "vendorReply", "reply"
+      ],
+      order: [["reviewedAt", "DESC"], ["updatedAt", "DESC"]],
+      limit,
     });
 
-    const items = [];
-    for (const o of rows) {
-      const dv = o?.dataValues || {};
-      // normalize rating / text from possible field names (any may be missing)
-      const rating =
-        dv.rating ?? dv.stars ?? dv.score ?? null;
+    const items = reviews.map((o) => {
+      const reply =
+        o.get?.("reviewReply") ??
+        o.get?.("vendorReply") ??
+        o.get?.("reply") ?? null;
 
-      const text =
-        dv.review ?? dv.comment ?? dv.feedback ?? dv.reviewText ?? null;
-
-      // include only if at least one of rating or text exists
-      if (rating == null && !text) continue;
-
-      items.push({
+      return {
         orderId: o.id,
-        rating: rating != null ? Number(rating) : null,
-        review: text || null,
-        reviewedAt: dv.reviewedAt || o.updatedAt || o.createdAt || null,
+        rating: o.rating,
+        review: o.review,
+        reply,                                             // <-- new
+        reviewedAt: o.reviewedAt || o.updatedAt || o.createdAt,
         user: o.User ? { id: o.User.id, name: o.User.name, email: o.User.email } : null,
-      });
-
-      if (items.length >= limit) break;
-    }
+      };
+    });
 
     return res.json({ vendorId: v.id, items });
   } catch (err) {
-    console.error("GET /vendors/me/reviews failed:", err);
-    // Keep UI alive; never 500 here
-    return res.status(200).json({ vendorId: null, items: [], _warning: err.message || "error" });
+    return res.status(500).json({ message: "Failed to load reviews", error: err.message });
   }
 });
+
+
+// Helper: ensure Orders table has a reply column; add one on-the-fly in dev if missing
+async function ensureOrdersReplyColumn() {
+  try {
+    const qi = db.sequelize.getQueryInterface();
+    const desc = await qi.describeTable("Orders");
+    // use first existing or create "reviewReply"
+    if (!desc.reviewReply && !desc.vendorReply && !desc.reply) {
+      await qi.addColumn("Orders", "reviewReply", { type: Sequelize.TEXT, allowNull: true });
+    }
+    return true;
+  } catch {
+    // swallow — we’ll still try to set whichever exists
+    return false;
+  }
+}
+
+// POST /api/vendors/me/reviews/:orderId/reply { text }
+router.post(
+  "/me/reviews/:orderId/reply",
+  authenticateToken,
+  requireVendor,
+  async (req, res) => {
+    try {
+      const v = await getOrCreateVendorForUser(req.user.id);
+      if (!v) return res.status(404).json({ message: "Vendor not found" });
+
+      const orderId = Number(req.params.orderId);
+      if (!Number.isFinite(orderId)) return res.status(400).json({ message: "Invalid order id" });
+
+      const text = String(req.body?.text || "").trim();
+      if (!text) return res.status(400).json({ message: "Reply text is required" });
+
+      const order = await Order.findOne({ where: { id: orderId, VendorId: v.id } });
+      if (!order) return res.status(404).json({ message: "Order not found for this vendor" });
+      if (order.rating == null && !order.review) {
+        return res.status(400).json({ message: "Cannot reply: this order has no review/rating" });
+      }
+
+      // try to ensure a reply column exists (creates Orders.reviewReply if none)
+      await ensureOrdersReplyColumn();
+
+      // set whichever field exists in your model mapping
+      if ("reviewReply" in Order.rawAttributes) {
+        order.set("reviewReply", text);
+      } else if ("vendorReply" in Order.rawAttributes) {
+        order.set("vendorReply", text);
+      } else if ("reply" in Order.rawAttributes) {
+        order.set("reply", text);
+      } else {
+        // As a last resort, keep it safe and fail rather than damaging user review text
+        return res.status(409).json({
+          message:
+            "No reply column found on Orders. Please add a TEXT column named `reviewReply` (recommended)."
+        });
+      }
+
+      await order.save();
+
+      // notify vendor dashboard sockets (optional)
+      const io = req.app.get("io");
+      if (io) io.to(`vendor:${v.id}`).emit("review:reply", { orderId, reply: text });
+
+      return res.json({ ok: true, orderId, reply: text });
+    } catch (err) {
+      return res.status(500).json({ message: "Failed to save reply", error: err.message });
+    }
+  }
+);
 
 /* ============== TOGGLE OPEN/CLOSED ============== */
 router.patch("/me/open", authenticateToken, requireVendor, async (req, res) => {
