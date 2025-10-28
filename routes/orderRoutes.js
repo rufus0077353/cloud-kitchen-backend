@@ -1358,6 +1358,73 @@ router.patch(
     }
   }
 );
+
+
+// PATCH /api/orders/:id/review
+// body: { rating: number(1..5), review?: string }
+router.patch("/:id/review", authenticateToken, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid order id" });
+
+    const { rating, review } = req.body || {};
+    const num = Number(rating);
+    if (!Number.isFinite(num) || num < 1 || num > 5) {
+      return res.status(400).json({ message: "Rating must be 1 to 5" });
+    }
+
+    // Only the order's owner can review
+    const order = await Order.findByPk(id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+    if (order.UserId !== req.user.id) return res.status(403).json({ message: "Not your order" });
+
+    // (optional) ensure order is delivered before review
+    if (order.status && !["delivered", "completed", "paid"].includes(String(order.status).toLowerCase())) {
+      // you can relax this if you want:
+      // return res.status(400).json({ message: "You can review only after delivery" });
+    }
+
+    // Save canonical fields
+    order.rating = num;
+    order.review = typeof review === "string" ? review.trim() : null;
+    order.reviewedAt = new Date();
+    await order.save();
+
+    // Recompute vendor aggregates (avg & count) into Vendor table if those columns exist
+    // (safe even if columns don’t exist — just skip update)
+    const vendorId = order.VendorId;
+
+    // If your Vendor has ratingAvg / ratingCount columns, update them:
+    if (Vendor?.rawAttributes?.ratingAvg && Vendor?.rawAttributes?.ratingCount) {
+      const { Sequelize } = db;
+      const row = await Order.findOne({
+        where: { VendorId: vendorId, rating: { [Op.ne]: null } },
+        attributes: [
+          [Sequelize.fn("COUNT", Sequelize.col("Order.id")), "cnt"],
+          [Sequelize.fn("AVG", Sequelize.col("Order.rating")), "avg"],
+        ],
+        raw: true,
+      });
+      const ratingCount = Number(row?.cnt || 0);
+      const ratingAvg = ratingCount > 0 ? Number(row?.avg || 0) : 0;
+      await Vendor.update({ ratingCount, ratingAvg }, { where: { id: vendorId } });
+    }
+
+    // Notify vendor UI to refresh reviews & ratings
+    emitToVendorHelper(req, vendorId, "review:new", {
+      orderId: order.id,
+      VendorId: vendorId,
+      rating: order.rating,
+      review: order.review,
+      reviewedAt: order.reviewedAt,
+    });
+
+    return res.json({ message: "Review saved", orderId: order.id });
+  } catch (e) {
+    return res.status(500).json({ message: "Failed to save review", error: e.message });
+  }
+});
+
 /* ===================== DEBUG: SCAN VENDORS ===================== */
 router.get(
   "/vendor/debug/scan",
