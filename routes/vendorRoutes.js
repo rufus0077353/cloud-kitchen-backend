@@ -135,6 +135,7 @@ router.get("/me/ratings/histogram", authenticateToken, requireVendor, async (req
 
 
 // GET /api/vendors/me/reviews?limit=20
+
 router.get("/me/reviews", authenticateToken, requireVendor, async (req, res) => {
   try {
     const v = await getOrCreateVendorForUser(req.user.id);
@@ -145,35 +146,53 @@ router.get("/me/reviews", authenticateToken, requireVendor, async (req, res) => 
     const reviews = await Order.findAll({
       where: { VendorId: v.id, rating: { [Op.ne]: null } },
       include: [{ model: User, attributes: ["id", "name", "email"] }],
-      // reply fields are optional — we’ll read whichever exists
       attributes: [
-        "id", "rating", "review", "reviewedAt", "createdAt", "updatedAt",
-        // optional columns if present in your schema:
-        "reviewReply", "vendorReply", "reply"
+        "id",
+        "rating",
+        "review",
+        "reviewedAt",
+        "createdAt",
+        "updatedAt",
+        // Optional columns — safely ignored if missing
+        ...(Order.rawAttributes.reviewReply ? ["reviewReply"] : []),
+        ...(Order.rawAttributes.vendorReply ? ["vendorReply"] : []),
+        ...(Order.rawAttributes.reply ? ["reply"] : []),
       ],
-      order: [["reviewedAt", "DESC"], ["updatedAt", "DESC"]],
+      order: [
+        [db.sequelize.literal(`COALESCE("Order"."reviewedAt","Order"."updatedAt","Order"."createdAt")`), "DESC"],
+      ],
       limit,
     });
 
     const items = reviews.map((o) => {
-      const reply =
-        o.get?.("reviewReply") ??
-        o.get?.("vendorReply") ??
-        o.get?.("reply") ?? null;
+      let reply = null;
+      try {
+        reply =
+          o.get?.("reviewReply") ??
+          o.get?.("vendorReply") ??
+          o.get?.("reply") ??
+          null;
+      } catch {}
 
       return {
         orderId: o.id,
-        rating: o.rating,
-        review: o.review,
-        reply,                                             // <-- new
+        rating: Number(o.rating || 0),
+        review: o.review || null,
+        reply,
         reviewedAt: o.reviewedAt || o.updatedAt || o.createdAt,
-        user: o.User ? { id: o.User.id, name: o.User.name, email: o.User.email } : null,
+        user: o.User
+          ? { id: o.User.id, name: o.User.name, email: o.User.email }
+          : null,
       };
     });
 
     return res.json({ vendorId: v.id, items });
   } catch (err) {
-    return res.status(500).json({ message: "Failed to load reviews", error: err.message });
+    console.error("❌ /me/reviews error:", err.message);
+    return res.status(500).json({
+      message: "Failed to load reviews",
+      error: err.message,
+    });
   }
 });
 
