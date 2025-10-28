@@ -135,31 +135,42 @@ router.get("/me/ratings/histogram", authenticateToken, requireVendor, async (req
 
 
 // GET /api/vendors/me/reviews?limit=20
+function pickExistingField(Model, candidates) {
+  if (!Model?.rawAttributes) return null;
+  for (const c of candidates) if (Model.rawAttributes[c]) return c;
+  return null;
+}
+function hasColumn(Model, name) {
+  return !!(Model?.rawAttributes && Model.rawAttributes[name]);
+}
+// Create Orders.reviewReply if missing (safe to call multiple times)
+async function ensureOrdersReplyColumn() {
+  await sequelize.query(`ALTER TABLE "Orders" ADD COLUMN IF NOT EXISTS "reviewReply" TEXT;`);
+  // NOTE: Model definition doesn't need the attribute to run raw update; we set via set()
+}
 
-// helpers
-const pickExistingField = (model, candidates = []) => {
-  const attrs = model?.rawAttributes ? Object.keys(model.rawAttributes) : [];
-  return candidates.find((c) => attrs.includes(c)) || null;
-};
-
+// ===== GET /me/reviews (multi-vendor, with fallbacks) =====
 router.get("/me/reviews", authenticateToken, requireVendor, async (req, res) => {
   try {
-    // Vendors owned by this user (handles multi-vendor accounts)
-    const myVendors = await Vendor.findAll({ where: { UserId: req.user.id }, attributes: ["id"] });
+    // vendors owned by this user
+    const myVendors = await Vendor.findAll({
+      where: { UserId: req.user.id },
+      attributes: ["id"],
+    });
     const vendorIds = myVendors.map(v => Number(v.id)).filter(Number.isFinite);
     if (!vendorIds.length) return res.status(404).json({ message: "Vendor not found" });
 
     const limit = Math.max(parseInt(req.query.limit || "20", 10), 1);
 
-    // Detect fields on Order
+    // detect fields on Order
     const orderRatingField = pickExistingField(Order, ["rating", "ratings", "stars", "star", "score"]);
     const orderReviewField = pickExistingField(Order, ["review", "comment", "feedback", "text"]);
     const orderReplyField  = pickExistingField(Order, ["reviewReply", "vendorReply", "reply"]);
-    const hasReviewedAt    = !!(Order?.rawAttributes && Order.rawAttributes.reviewedAt);
+    const hasReviewedAt    = hasColumn(Order, "reviewedAt");
 
     let items = [];
 
-    // Try reviews on Order
+    // try pulling reviews from Orders (preferred)
     if (orderRatingField || orderReviewField) {
       const whereOrder = {
         VendorId: { [Op.in]: vendorIds },
@@ -177,36 +188,35 @@ router.get("/me/reviews", authenticateToken, requireVendor, async (req, res) => 
         ...(orderReplyField ? [orderReplyField] : []),
       ];
 
-      // Build safe ORDER BY (no reviewedAt if column doesn’t exist)
+      // safe ORDER BY (won't reference a non-existent column)
       const orderExpr = hasReviewedAt
         ? `COALESCE("Order"."reviewedAt","Order"."updatedAt","Order"."createdAt")`
         : `COALESCE("Order"."updatedAt","Order"."createdAt")`;
 
-      const fromOrders = await Order.findAll({
+      const rows = await Order.findAll({
         where: whereOrder,
         include: [{ model: User, attributes: ["id", "name", "email"] }],
         attributes: orderAttrs,
-        order: [[db.sequelize.literal(orderExpr), "DESC"]],
+        order: [[sequelize.literal(orderExpr), "DESC"]],
         limit,
       });
 
-      items = (fromOrders || []).map((o) => {
-        const ratingVal = orderRatingField ? o[orderRatingField] : null;
-        const reviewVal = orderReviewField ? o[orderReviewField] : null;
-        const replyVal  = orderReplyField  ? o[orderReplyField]  : null;
-        return {
-          source: "order",
-          orderId: o.id,
-          rating: ratingVal != null ? Number(ratingVal) : null,
-          review: reviewVal ?? null,
-          reply:  replyVal  ?? null,
-          reviewedAt: hasReviewedAt ? (o.reviewedAt || o.updatedAt || o.createdAt) : (o.updatedAt || o.createdAt),
-          user: o.User ? { id: o.User.id, name: o.User.name, email: o.User.email } : null,
-        };
-      });
+      items = (rows || []).map(o => ({
+        source: "order",
+        orderId: o.id,
+        rating: orderRatingField != null && o[orderRatingField] != null
+          ? Number(o[orderRatingField])
+          : null,
+        review: orderReviewField ? (o[orderReviewField] ?? null) : null,
+        reply:  orderReplyField  ? (o[orderReplyField]  ?? null) : null,
+        reviewedAt: hasReviewedAt
+          ? (o.reviewedAt || o.updatedAt || o.createdAt)
+          : (o.updatedAt || o.createdAt),
+        user: o.User ? { id: o.User.id, name: o.User.name, email: o.User.email } : null,
+      }));
     }
 
-    // Fallback to per-item reviews on OrderItem if nothing found on Order
+    // fallback: per-item reviews on OrderItem
     if (!items.length) {
       const oiRatingField = pickExistingField(OrderItem, ["rating", "ratings", "stars", "star", "score"]);
       const oiReviewField = pickExistingField(OrderItem, ["review", "comment", "feedback", "text"]);
@@ -266,9 +276,11 @@ router.get("/me/reviews", authenticateToken, requireVendor, async (req, res) => 
     return res.json({ vendorIds, items });
   } catch (err) {
     console.error("❌ /me/reviews error:", err);
+    // keep API resilient (no 500 page crash)
     return res.status(200).json({ vendorIds: [], items: [], _warning: err.message || "unknown" });
   }
 });
+
 
 // GET /api/vendors/me/reviews/debug
 router.get("/me/reviews/debug", authenticateToken, requireVendor, async (req, res) => {
@@ -323,58 +335,112 @@ async function ensureOrdersReplyColumn() {
   }
 }
 
-// POST /api/vendors/me/reviews/:orderId/reply { text }
-router.post(
-  "/me/reviews/:orderId/reply",
-  authenticateToken,
-  requireVendor,
-  async (req, res) => {
-    try {
-      const v = await getOrCreateVendorForUser(req.user.id);
-      if (!v) return res.status(404).json({ message: "Vendor not found" });
+// ===== CREATE reply (POST) =====
+// POST /api/vendors/me/reviews/:orderId/reply  { text }
+router.post("/me/reviews/:orderId/reply", authenticateToken, requireVendor, async (req, res) => {
+  try {
+    const myVendors = await Vendor.findAll({ where: { UserId: req.user.id }, attributes: ["id"] });
+    const vendorIds = myVendors.map(v => Number(v.id)).filter(Number.isFinite);
+    if (!vendorIds.length) return res.status(404).json({ message: "Vendor not found" });
 
-      const orderId = Number(req.params.orderId);
-      if (!Number.isFinite(orderId)) return res.status(400).json({ message: "Invalid order id" });
+    const orderId = Number(req.params.orderId);
+    if (!Number.isFinite(orderId)) return res.status(400).json({ message: "Invalid order id" });
 
-      const text = String(req.body?.text || "").trim();
-      if (!text) return res.status(400).json({ message: "Reply text is required" });
+    const text = String(req.body?.text || "").trim();
+    if (!text) return res.status(400).json({ message: "Reply text is required" });
 
-      const order = await Order.findOne({ where: { id: orderId, VendorId: v.id } });
-      if (!order) return res.status(404).json({ message: "Order not found for this vendor" });
-      if (order.rating == null && !order.review) {
-        return res.status(400).json({ message: "Cannot reply: this order has no review/rating" });
-      }
+    const order = await Order.findOne({ where: { id: orderId, VendorId: { [Op.in]: vendorIds } } });
+    if (!order) return res.status(404).json({ message: "Order not found for this vendor" });
 
-      // try to ensure a reply column exists (creates Orders.reviewReply if none)
-      await ensureOrdersReplyColumn();
-
-      // set whichever field exists in your model mapping
-      if ("reviewReply" in Order.rawAttributes) {
-        order.set("reviewReply", text);
-      } else if ("vendorReply" in Order.rawAttributes) {
-        order.set("vendorReply", text);
-      } else if ("reply" in Order.rawAttributes) {
-        order.set("reply", text);
-      } else {
-        // As a last resort, keep it safe and fail rather than damaging user review text
-        return res.status(409).json({
-          message:
-            "No reply column found on Orders. Please add a TEXT column named `reviewReply` (recommended)."
-        });
-      }
-
-      await order.save();
-
-      // notify vendor dashboard sockets (optional)
-      const io = req.app.get("io");
-      if (io) io.to(`vendor:${v.id}`).emit("review:reply", { orderId, reply: text });
-
-      return res.json({ ok: true, orderId, reply: text });
-    } catch (err) {
-      return res.status(500).json({ message: "Failed to save reply", error: err.message });
+    const ratingField = pickExistingField(Order, ["rating", "ratings", "stars", "star", "score"]);
+    const reviewField = pickExistingField(Order, ["review", "comment", "feedback", "text"]);
+    if ((!ratingField || order[ratingField] == null) && (!reviewField || !order[reviewField])) {
+      return res.status(400).json({ message: "Cannot reply: order has no review/rating" });
     }
+
+    await ensureOrdersReplyColumn();
+    const replyField = pickExistingField(Order, ["reviewReply", "vendorReply", "reply"]) || "reviewReply";
+
+    if (order[replyField]) {
+      return res.status(409).json({ message: "Reply already exists. Use PATCH to edit." });
+    }
+
+    order.set(replyField, text);
+    await order.save();
+
+    const reply = order.get(replyField);
+    const io = req.app.get("io");
+    if (io) io.to(`vendor:${order.VendorId}`).emit("review:reply", { orderId, reply });
+
+    return res.json({ ok: true, orderId, reply });
+  } catch (err) {
+    return res.status(500).json({ message: "Failed to save reply", error: err.message });
   }
-);
+});
+
+
+// ===== EDIT reply (PATCH) =====
+// PATCH /api/vendors/me/reviews/:orderId/reply  { text }
+router.patch("/me/reviews/:orderId/reply", authenticateToken, requireVendor, async (req, res) => {
+  try {
+    const myVendors = await Vendor.findAll({ where: { UserId: req.user.id }, attributes: ["id"] });
+    const vendorIds = myVendors.map(v => Number(v.id)).filter(Number.isFinite);
+    if (!vendorIds.length) return res.status(404).json({ message: "Vendor not found" });
+
+    const orderId = Number(req.params.orderId);
+    if (!Number.isFinite(orderId)) return res.status(400).json({ message: "Invalid order id" });
+
+    const text = String(req.body?.text || "").trim();
+    if (!text) return res.status(400).json({ message: "Reply text is required" });
+
+    const order = await Order.findOne({ where: { id: orderId, VendorId: { [Op.in]: vendorIds } } });
+    if (!order) return res.status(404).json({ message: "Order not found for this vendor" });
+
+    await ensureOrdersReplyColumn();
+    const replyField = pickExistingField(Order, ["reviewReply", "vendorReply", "reply"]) || "reviewReply";
+
+    order.set(replyField, text);
+    await order.save();
+
+    const reply = order.get(replyField);
+    const io = req.app.get("io");
+    if (io) io.to(`vendor:${order.VendorId}`).emit("review:reply:edit", { orderId, reply });
+
+    return res.json({ ok: true, orderId, reply });
+  } catch (err) {
+    return res.status(500).json({ message: "Failed to update reply", error: err.message });
+  }
+});
+
+
+// ===== DELETE reply =====
+// DELETE /api/vendors/me/reviews/:orderId/reply
+router.delete("/me/reviews/:orderId/reply", authenticateToken, requireVendor, async (req, res) => {
+  try {
+    const myVendors = await Vendor.findAll({ where: { UserId: req.user.id }, attributes: ["id"] });
+    const vendorIds = myVendors.map(v => Number(v.id)).filter(Number.isFinite);
+    if (!vendorIds.length) return res.status(404).json({ message: "Vendor not found" });
+
+    const orderId = Number(req.params.orderId);
+    if (!Number.isFinite(orderId)) return res.status(400).json({ message: "Invalid order id" });
+
+    const order = await Order.findOne({ where: { id: orderId, VendorId: { [Op.in]: vendorIds } } });
+    if (!order) return res.status(404).json({ message: "Order not found for this vendor" });
+
+    await ensureOrdersReplyColumn();
+    const replyField = pickExistingField(Order, ["reviewReply", "vendorReply", "reply"]) || "reviewReply";
+
+    order.set(replyField, null);
+    await order.save();
+
+    const io = req.app.get("io");
+    if (io) io.to(`vendor:${order.VendorId}`).emit("review:reply:delete", { orderId });
+
+    return res.json({ ok: true, orderId });
+  } catch (err) {
+    return res.status(500).json({ message: "Failed to remove reply", error: err.message });
+  }
+});
 
 /* ============== TOGGLE OPEN/CLOSED ============== */
 router.patch("/me/open", authenticateToken, requireVendor, async (req, res) => {
