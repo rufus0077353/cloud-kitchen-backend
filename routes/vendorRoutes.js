@@ -136,6 +136,8 @@ router.get("/me/ratings/histogram", authenticateToken, requireVendor, async (req
 
 // GET /api/vendors/me/reviews?limit=20
 
+
+// GET /api/vendors/me/reviews
 router.get("/me/reviews", authenticateToken, requireVendor, async (req, res) => {
   try {
     const v = await getOrCreateVendorForUser(req.user.id);
@@ -143,28 +145,38 @@ router.get("/me/reviews", authenticateToken, requireVendor, async (req, res) => 
 
     const limit = Math.max(parseInt(req.query.limit || "20", 10), 1);
 
-    const reviews = await Order.findAll({
-      where: { VendorId: v.id, rating: { [Op.ne]: null } },
-      include: [{ model: User, attributes: ["id", "name", "email"] }],
-      attributes: [
-        "id",
-        "rating",
-        "review",
-        "reviewedAt",
-        "createdAt",
-        "updatedAt",
-        // Optional columns — safely ignored if missing
-        ...(Order.rawAttributes.reviewReply ? ["reviewReply"] : []),
-        ...(Order.rawAttributes.vendorReply ? ["vendorReply"] : []),
-        ...(Order.rawAttributes.reply ? ["reply"] : []),
+    // ---------- 1) Try pulling reviews from Orders ----------
+    const whereFromOrders = {
+      VendorId: v.id,
+      [Op.or]: [
+        { rating: { [Op.ne]: null } },
+        { review: { [Op.ne]: null } },
       ],
+    };
+
+    const orderAttrs = [
+      "id",
+      "rating",
+      "review",
+      "reviewedAt",
+      "createdAt",
+      "updatedAt",
+      ...(Order?.rawAttributes?.reviewReply ? ["reviewReply"] : []),
+      ...(Order?.rawAttributes?.vendorReply ? ["vendorReply"] : []),
+      ...(Order?.rawAttributes?.reply ? ["reply"] : []),
+    ];
+
+    let fromOrders = await Order.findAll({
+      where: whereFromOrders,
+      include: [{ model: User, attributes: ["id", "name", "email"] }],
+      attributes: orderAttrs,
       order: [
         [db.sequelize.literal(`COALESCE("Order"."reviewedAt","Order"."updatedAt","Order"."createdAt")`), "DESC"],
       ],
       limit,
     });
 
-    const items = reviews.map((o) => {
+    const mapOrderReview = (o) => {
       let reply = null;
       try {
         reply =
@@ -173,26 +185,123 @@ router.get("/me/reviews", authenticateToken, requireVendor, async (req, res) => 
           o.get?.("reply") ??
           null;
       } catch {}
-
       return {
+        source: "order",
         orderId: o.id,
-        rating: Number(o.rating || 0),
-        review: o.review || null,
+        rating: (o.rating != null ? Number(o.rating) : null),
+        review: o.review ?? null,
         reply,
         reviewedAt: o.reviewedAt || o.updatedAt || o.createdAt,
-        user: o.User
-          ? { id: o.User.id, name: o.User.name, email: o.User.email }
-          : null,
+        user: o.User ? { id: o.User.id, name: o.User.name, email: o.User.email } : null,
       };
-    });
+    };
+
+    let items = Array.isArray(fromOrders) ? fromOrders.map(mapOrderReview) : [];
+
+    // ---------- 2) Fallback: try per-item reviews on OrderItems ----------
+    if (items.length === 0) {
+      // If your schema has item-level ratings/reviews, we’ll surface them.
+      const itemWhere = { VendorId: v.id };
+      const hasItemRating = !!OrderItem?.rawAttributes?.rating;
+      const hasItemReview = !!OrderItem?.rawAttributes?.review;
+
+      if (hasItemRating || hasItemReview) {
+        const oi = await Order.findAll({
+          where: { VendorId: v.id },
+          include: [
+            { model: User, attributes: ["id", "name", "email"] },
+            {
+              model: OrderItem,
+              required: true,
+              where: {
+                [Op.or]: [
+                  ...(hasItemRating ? [{ rating: { [Op.ne]: null } }] : []),
+                  ...(hasItemReview ? [{ review: { [Op.ne]: null } }] : []),
+                ],
+              },
+              include: [{ model: MenuItem, attributes: ["id", "name"] }],
+              attributes: [
+                "id",
+                ...(hasItemRating ? ["rating"] : []),
+                ...(hasItemReview ? ["review"] : []),
+                "createdAt",
+                "updatedAt",
+              ],
+            },
+          ],
+          order: [["updatedAt", "DESC"]],
+          limit, // limit total orders; we’ll flatten below
+        });
+
+        const flattened = [];
+        for (const o of oi) {
+          const baseUser = o.User ? { id: o.User.id, name: o.User.name, email: o.User.email } : null;
+          const when = o.updatedAt || o.createdAt;
+          for (const it of (o.OrderItems || [])) {
+            const anyRating = hasItemRating ? it.rating : null;
+            const anyReview = hasItemReview ? it.review : null;
+            if (anyRating == null && (anyReview == null || anyReview === "")) continue;
+            flattened.push({
+              source: "orderItem",
+              orderId: o.id,
+              orderItemId: it.id,
+              item: it.MenuItem ? { id: it.MenuItem.id, name: it.MenuItem.name } : null,
+              rating: (anyRating != null ? Number(anyRating) : null),
+              review: anyReview ?? null,
+              reply: null,
+              reviewedAt: when,
+              user: baseUser,
+            });
+          }
+        }
+
+        // Sort newest first and respect the same limit
+        flattened.sort((a, b) => new Date(b.reviewedAt) - new Date(a.reviewedAt));
+        items = flattened.slice(0, limit);
+      }
+    }
 
     return res.json({ vendorId: v.id, items });
   } catch (err) {
-    console.error("❌ /me/reviews error:", err.message);
-    return res.status(500).json({
-      message: "Failed to load reviews",
-      error: err.message,
+    console.error("❌ /me/reviews error:", err);
+    return res.status(500).json({ message: "Failed to load reviews", error: err.message });
+  }
+});
+
+
+// GET /api/vendors/me/reviews/debug
+router.get("/me/reviews/debug", authenticateToken, requireVendor, async (req, res) => {
+  try {
+    const v = await getOrCreateVendorForUser(req.user.id);
+    if (!v) return res.status(404).json({ ok: false, message: "Vendor not found" });
+
+    const ordersWithRating = await Order.count({ where: { VendorId: v.id, rating: { [Op.ne]: null } } });
+    const ordersWithReview = await Order.count({ where: { VendorId: v.id, review: { [Op.ne]: null } } });
+
+    const hasItemRating = !!OrderItem?.rawAttributes?.rating;
+    const hasItemReview = !!OrderItem?.rawAttributes?.review;
+
+    let itemsWithRating = 0, itemsWithReview = 0;
+    if (hasItemRating) {
+      itemsWithRating = await OrderItem.count({
+        include: [{ model: Order, required: true, where: { VendorId: v.id } }],
+        where: { rating: { [Op.ne]: null } },
+      });
+    }
+    if (hasItemReview) {
+      itemsWithReview = await OrderItem.count({
+        include: [{ model: Order, required: true, where: { VendorId: v.id } }],
+        where: { review: { [Op.ne]: null } },
+      });
+    }
+
+    return res.json({
+      vendorId: v.id,
+      ordersLayer: { withRating: ordersWithRating, withReview: ordersWithReview },
+      orderItemsLayer: { hasItemRating, hasItemReview, itemsWithRating, itemsWithReview },
     });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
   }
 });
 
