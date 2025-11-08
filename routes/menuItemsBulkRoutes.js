@@ -154,4 +154,41 @@ router.post("/bulk-csv", authenticateToken, requireVendor, upload.single("file")
   }
 });
 
+
+
+// GET /api/menu-items/export-csv  -> download current vendor menu
+router.get("/export-csv", authenticateToken, requireVendor, async (req, res) => {
+  try {
+    const vendorId = Number(req.user?.vendorId);
+    if (!Number.isFinite(vendorId)) {
+      return res.status(403).json({ message: "No vendor linked to this account" });
+    }
+
+    const items = await MenuItem.findAll({
+      where: { VendorId: vendorId },
+      order: [["name", "ASC"]],
+      attributes: ["name", "price", "description", "imageUrl", "isAvailable", "createdAt", "updatedAt"],
+      raw: true,
+    });
+
+    const header = ["name","price","description","imageUrl","isAvailable","createdAt","updatedAt"];
+    let csv = header.join(",") + "\n";
+    for (const r of items) {
+      const line = header.map((h) => {
+        const v = r[h] == null ? "" : String(r[h]);
+        const escaped = v.replace(/"/g, '""');
+        return /[",\n]/.test(escaped) ? `"${escaped}"` : escaped;
+      }).join(",");
+      csv += line + "\n";
+    }
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="menu-export.csv"');
+    return res.send(csv);
+  } catch (e) {
+    console.error("GET /api/menu-items/export-csv error:", e);
+    return res.status(500).json({ message: "Export failed", error: e.message });
+  }
+});
+
 module.exports = router;
