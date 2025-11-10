@@ -1,3 +1,4 @@
+
 // utils/mailer.js
 const nodemailer = require("nodemailer");
 const sg = require("@sendgrid/mail");
@@ -46,15 +47,6 @@ function getTransport() {
 
 /**
  * sendMail
- * @param {object} opts
- * @param {string|string[]} opts.to
- * @param {string} opts.subject
- * @param {string} opts.html
- * @param {string} [opts.text]
- * @param {string} [opts.category]           // "confirm" | "otp" | "receipt" | "marketing" ...
- * @param {string} [opts.listUnsubURL]       // for marketing
- * @param {boolean} [opts.transactional=true]
- * @param {string} [opts.replyTo]
  */
 async function sendMail({
   to,
@@ -121,4 +113,19 @@ async function sendMail({
   }
 }
 
-module.exports = { sendMail };
+/* ---------- diagnostics for /api/dev-email/diag ---------- */
+const SG_KEY_RAW = String(process.env.SENDGRID_API_KEY || "");
+const preview = SG_KEY_RAW ? `${SG_KEY_RAW.slice(0, 4)}…${SG_KEY_RAW.slice(-4)}` : "";
+
+module.exports = {
+  sendMail,
+  __diag: {
+    provider: () => (process.env.MAIL_PROVIDER || "sendgrid").toLowerCase(),
+    isProd: () =>
+      String(process.env.NODE_ENV || "").toLowerCase() === "production" ||
+      String(process.env.ENV || "").toLowerCase() === "prod",
+    from: () => FROM,
+    keyLen: () => SG_KEY_RAW.length,
+    keyPreview: () => preview,
+  },
+};

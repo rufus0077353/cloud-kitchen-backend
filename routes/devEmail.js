@@ -1,11 +1,11 @@
 
-// routes/devEmail.js (CommonJS)
+// routes/devEmail.js
 const express = require("express");
 const router = express.Router();
 const { sendMail } = require("../utils/mailer");
 
-// quick health
-router.get("/ping", (req, res) => res.json({ ok: true, t: Date.now() }));
+// GET /api/dev-email/ping
+router.get("/ping", (_req, res) => res.json({ ok: true, t: Date.now() }));
 
 // POST /api/dev-email/send
 router.post("/send", async (req, res) => {
