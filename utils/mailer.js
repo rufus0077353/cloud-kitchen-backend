@@ -1,21 +1,27 @@
-
 // utils/mailer.js
 const nodemailer = require("nodemailer");
 const sg = require("@sendgrid/mail");
 
-const ENV = process.env.ENV || "dev";
-const FROM = process.env.MAIL_FROM || "Servezy <no-reply@example.com>";
+// prod if NODE_ENV=production OR ENV=prod
+const isProd =
+  String(process.env.NODE_ENV || "").toLowerCase() === "production" ||
+  String(process.env.ENV || "").toLowerCase() === "prod";
+
+// allow both env names
+const FROM =
+  process.env.EMAIL_FROM ||
+  process.env.MAIL_FROM ||
+  "Servezy <no-reply@example.com>";
+
 const PROVIDER = (process.env.MAIL_PROVIDER || "sendgrid").toLowerCase();
 
+// allow-list for non-prod
 const whitelist = (process.env.WHITELIST_EMAILS || "")
   .split(",")
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
 
-const canSend = (to) => {
-  if (ENV === "prod") return true;
-  return whitelist.includes(String(to).toLowerCase());
-};
+const canSend = (to) => isProd || whitelist.includes(String(to).toLowerCase());
 
 // --- providers ---
 function getTransport() {
@@ -28,7 +34,11 @@ function getTransport() {
     });
   }
   // default: SendGrid
-  sg.setApiKey(process.env.SENDGRID_API_KEY || "");
+  const key = process.env.SENDGRID_API_KEY || "";
+  if (!key && isProd) {
+    console.warn("[mailer] SENDGRID_API_KEY missing in prod");
+  }
+  sg.setApiKey(key);
   return null;
 }
 
@@ -53,14 +63,7 @@ async function sendMail({
 
   if (PROVIDER === "smtp") {
     const t = getTransport();
-    const info = await t.sendMail({
-      from: FROM,
-      to,
-      subject,
-      html,
-      text,
-      headers,
-    });
+    const info = await t.sendMail({ from: FROM, to, subject, html, text, headers });
     return { ok: true, id: info.messageId };
   } else {
     const msg = {
@@ -70,9 +73,7 @@ async function sendMail({
       html,
       text,
       headers,
-      mailSettings: {
-        bypassListManagement: { enable: transactional },
-      },
+      mailSettings: { bypassListManagement: { enable: transactional } },
       categories: category ? [category] : undefined,
     };
     const [res] = await sg.send(msg);

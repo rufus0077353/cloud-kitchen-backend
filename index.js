@@ -222,7 +222,7 @@ mountSafe("/api/menu-items", menuItemsBulkRoutes);
 mountSafe("/api/otp", otpRoutes);
 mountSafe("/api/email", emailConfirmRoutes);
 mountSafe("/api/marketing", marketingRoutes);
-mountSafe("/api/dev-email", devEmailRoutes)
+mountSafe("/api/dev-email", devEmailRoutes);
 if (paymentsRouter) mountWithEmit("/api/payments", paymentsRouter);
 
 /* =========================
