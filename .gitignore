@@ -1,2 +1,31 @@
-"node_modules/" 
-".env" 
+
+# === Servezy Backend Git Ignore ===
+
+# Environment files (never push these)
+.env
+.env.local
+.env.development
+.env.production
+
+# Node dependencies
+node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+*.log
+
+# OS / IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Build & temporary
+dist/
+coverage/
+.tmp/
+.cache/
+uploads/
