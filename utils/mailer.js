@@ -41,7 +41,7 @@ function getTransport() {
   }
   const key = process.env.SENDGRID_API_KEY || "";
   if (!key && isProd) console.warn("[mailer] SENDGRID_API_KEY missing in prod");
-  sg.setApiKey(key);
+  sg.setApiKey((process.env.SENDGRID_API_KEY || "").trim());
   return null;
 }
 

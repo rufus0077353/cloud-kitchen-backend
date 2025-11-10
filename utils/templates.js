@@ -8,25 +8,15 @@ const baseStyles = `
   .btn{display:inline-block;padding:10px 16px;border-radius:8px;background:#0b6bcb;color:#fff;text-decoration:none;font-weight:600}
   .muted{color:#6b7280;font-size:12px}
 `;
-
 function shell({ title, content }) {
-  return `
-  <!doctype html>
-  <html><head><meta charset="utf-8"/>
+  return `<!doctype html><html><head><meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <style>${baseStyles}</style></head>
-  <body>
-    <div class="wrap">
-      <div class="head">${title}</div>
-      <div class="body">
-        ${content}
-        <p class="muted" style="margin-top:20px">If you didn’t request this, you can safely ignore this email.</p>
-      </div>
-    </div>
-  </body></html>`;
+  <body><div class="wrap"><div class="head">${title}</div>
+  <div class="body">${content}
+  <p class="muted" style="margin-top:20px">If you didn’t request this, you can safely ignore this email.</p>
+  </div></div></body></html>`;
 }
-
-/* -------- Templates -------- */
 
 function confirmEmail({ name = "there", url }) {
   const title = "Verify your email";
@@ -36,9 +26,7 @@ function confirmEmail({ name = "there", url }) {
     <p><a class="btn" href="${url}" target="_blank" rel="noopener">Verify Email</a></p>
     <p class="muted">Or copy this link into your browser:<br>${url}</p>`;
   const html = shell({ title, content });
-  const text =
-    `Hi ${name},\n\nPlease verify your email address:\n${url}\n\n` +
-    `If you didn’t request this, ignore this email.`;
+  const text = `Hi ${name},\n\nPlease verify your email address:\n${url}\n\nIf you didn’t request this, ignore this email.`;
   return { subject: "Verify your email", html, text };
 }
 
@@ -46,7 +34,7 @@ function otpEmail({ code, purpose = "verification" }) {
   const title = "Your verification code";
   const content = `
     <p>Use this code to complete ${purpose}:</p>
-    <p style="font-size:28px;letter-spacing:6px;font-weight:700">${String(code || "").padStart(6, "0")}</p>
+    <p style="font-size:28px;letter-spacing:6px;font-weight:700">${String(code || "").padStart(6,"0")}</p>
     <p class="muted">The code expires in 10 minutes.</p>`;
   const html = shell({ title, content });
   const text = `Your ${purpose} code: ${code} (expires in 10 minutes).`;
@@ -70,11 +58,4 @@ function marketing({ title = "Hello from Servezy", body = "" }) {
   return { subject: title, html, text };
 }
 
-const templates = {
-  confirmEmail,
-  otpEmail,
-  resetPassword,
-  marketing,
-};
-
-module.exports = { templates };
+module.exports = { templates: { confirmEmail, otpEmail, resetPassword, marketing } };
