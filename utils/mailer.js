@@ -1,4 +1,3 @@
-
 // utils/mailer.js
 const nodemailer = require("nodemailer");
 const sg = require("@sendgrid/mail");
@@ -8,10 +7,16 @@ const isProd =
   String(process.env.NODE_ENV || "").toLowerCase() === "production" ||
   String(process.env.ENV || "").toLowerCase() === "prod";
 
-const FROM =
+// normalize FROM (strip accidental quotes from .env)
+function cleanFrom(v) {
+  const s = String(v || "").trim();
+  return s.replace(/^"+|"+$/g, ""); // remove leading/trailing quotes
+}
+const FROM = cleanFrom(
   process.env.EMAIL_FROM ||
   process.env.MAIL_FROM ||
-  "Servezy <no-reply@servezy.in>";
+  "Servezy <no-reply@servezy.in>"
+);
 
 const PROVIDER = (process.env.MAIL_PROVIDER || "sendgrid").toLowerCase();
 
@@ -34,9 +39,7 @@ function getTransport() {
     });
   }
   const key = process.env.SENDGRID_API_KEY || "";
-  if (!key && isProd) {
-    console.warn("[mailer] SENDGRID_API_KEY missing in prod");
-  }
+  if (!key && isProd) console.warn("[mailer] SENDGRID_API_KEY missing in prod");
   sg.setApiKey(key);
   return null;
 }
@@ -51,7 +54,7 @@ function getTransport() {
  * @param {string} [opts.category]           // "confirm" | "otp" | "receipt" | "marketing" ...
  * @param {string} [opts.listUnsubURL]       // for marketing
  * @param {boolean} [opts.transactional=true]
- * @param {string} [opts.replyTo]            // optional reply-to
+ * @param {string} [opts.replyTo]
  */
 async function sendMail({
   to,
@@ -65,15 +68,22 @@ async function sendMail({
 }) {
   if (!canSend(to)) return { skipped: true, reason: "not-whitelisted" };
 
+  // ---- build safe headers
   const headers = {};
-  if (category) headers["X-Category"] = category;
-  if (!transactional && listUnsubURL) {
-    headers["List-Unsubscribe"] = `<${listUnsubURL}>`;
-    headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
+  if (category && typeof category === "string") {
+    headers["X-Category"] = category.trim();
+  }
+  if (!transactional && typeof listUnsubURL === "string") {
+    const u = listUnsubURL.trim();
+    if (u && /^https?:\/\//i.test(u)) {
+      headers["List-Unsubscribe"] = `<${u}>`;
+      headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
+    }
   }
 
-  // Ensure plain-text fallback exists (improves deliverability)
-  const textBody = text || (html ? html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : "");
+  // plain-text fallback (helps deliverability)
+  const textBody =
+    text || (html ? html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : "");
 
   if (PROVIDER === "smtp") {
     const t = getTransport();
@@ -84,7 +94,7 @@ async function sendMail({
       html,
       text: textBody,
       headers,
-      replyTo,
+      ...(replyTo ? { replyTo } : {}),
     });
     return { ok: true, id: info.messageId };
   } else {
@@ -96,17 +106,15 @@ async function sendMail({
       html,
       text: textBody,
       headers,
-      // For transactional, disable click/open tracking to avoid Promotions/Spam
       trackingSettings: transactional
         ? {
             clickTracking: { enable: false, enableText: false },
             openTracking: { enable: false },
           }
         : undefined,
-      // Transactional should bypass list mgmt; Marketing should not.
       mailSettings: { bypassListManagement: { enable: transactional } },
       categories: category ? [category] : undefined,
-      replyTo,
+      ...(replyTo ? { replyTo } : {}),
     };
     const [res] = await sg.send(msg);
     return { ok: res.statusCode < 300, id: res.headers["x-message-id"] || "" };
