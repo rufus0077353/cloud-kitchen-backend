@@ -152,6 +152,7 @@ const otpRoutes = require("./routes/otpRoutes");
 const emailConfirmRoutes = require("./routes/emailConfirmRoutes");
 const marketingRoutes = require("./routes/marketingRoutes");
 const devEmailRoutes = require("./routes/devEmail");
+const devEmailDiagRoutes = require("./routes/devEmailDiagRoutes");
 
 let paymentsRouter = null;
 try {
@@ -223,6 +224,7 @@ mountSafe("/api/otp", otpRoutes);
 mountSafe("/api/email", emailConfirmRoutes);
 mountSafe("/api/marketing", marketingRoutes);
 mountSafe("/api/dev-email", devEmailRoutes);
+mountSafe("/api/dev-email", devEmailDiagRoutes);
 if (paymentsRouter) mountWithEmit("/api/payments", paymentsRouter);
 
 /* =========================

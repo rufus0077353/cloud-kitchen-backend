@@ -1,3 +1,4 @@
+
 // utils/mailer.js
 const nodemailer = require("nodemailer");
 const sg = require("@sendgrid/mail");
@@ -9,8 +10,7 @@ const isProd =
 
 // allow both env names
 const FROM =
-  process.env.EMAIL_FROM ||
-  process.env.MAIL_FROM ||
+  (process.env.EMAIL_FROM || process.env.MAIL_FROM || "").trim() ||
   "Servezy <no-reply@example.com>";
 
 const PROVIDER = (process.env.MAIL_PROVIDER || "sendgrid").toLowerCase();
@@ -27,16 +27,21 @@ const canSend = (to) => isProd || whitelist.includes(String(to).toLowerCase());
 function getTransport() {
   if (PROVIDER === "smtp") {
     return nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT || 587),
+      host: (process.env.SMTP_HOST || "").trim(),
+      port: Number((process.env.SMTP_PORT || "587").trim()),
       secure: false,
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      auth: {
+        user: (process.env.SMTP_USER || "").trim(),
+        pass: (process.env.SMTP_PASS || "").trim(),
+      },
     });
   }
   // default: SendGrid
-  const key = process.env.SENDGRID_API_KEY || "";
-  if (!key && isProd) {
-    console.warn("[mailer] SENDGRID_API_KEY missing in prod");
+  const raw = process.env.SENDGRID_API_KEY || "";
+  // 🔒 strip any quotes/newlines/spaces that break the Authorization header
+  const key = raw.replace(/["'\r\n\t ]+/g, "").trim();
+  if (!key) {
+    console.warn("[mailer] SENDGRID_API_KEY is empty after trimming");
   }
   sg.setApiKey(key);
   return null;
@@ -66,6 +71,7 @@ async function sendMail({
     const info = await t.sendMail({ from: FROM, to, subject, html, text, headers });
     return { ok: true, id: info.messageId };
   } else {
+    getTransport(); // ensures SendGrid key is sanitized & set
     const msg = {
       from: FROM,
       to,
@@ -81,4 +87,10 @@ async function sendMail({
   }
 }
 
-module.exports = { sendMail };
+module.exports = { sendMail, __diag: {
+  provider: () => PROVIDER,
+  isProd: () => isProd,
+  from: () => FROM,
+  keyLen: () => ((process.env.SENDGRID_API_KEY || "").length),
+  keyPreview: () => ((process.env.SENDGRID_API_KEY || "").slice(0,5) + "..."),
+}};
