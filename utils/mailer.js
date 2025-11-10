@@ -8,10 +8,10 @@ const isProd =
   String(process.env.NODE_ENV || "").toLowerCase() === "production" ||
   String(process.env.ENV || "").toLowerCase() === "prod";
 
-// allow both env names
 const FROM =
-  (process.env.EMAIL_FROM || process.env.MAIL_FROM || "").trim() ||
-  "Servezy <no-reply@example.com>";
+  process.env.EMAIL_FROM ||
+  process.env.MAIL_FROM ||
+  "Servezy <no-reply@servezy.in>";
 
 const PROVIDER = (process.env.MAIL_PROVIDER || "sendgrid").toLowerCase();
 
@@ -27,27 +27,32 @@ const canSend = (to) => isProd || whitelist.includes(String(to).toLowerCase());
 function getTransport() {
   if (PROVIDER === "smtp") {
     return nodemailer.createTransport({
-      host: (process.env.SMTP_HOST || "").trim(),
-      port: Number((process.env.SMTP_PORT || "587").trim()),
+      host: process.env.SMTP_HOST,
+      port: Number(process.env.SMTP_PORT || 587),
       secure: false,
-      auth: {
-        user: (process.env.SMTP_USER || "").trim(),
-        pass: (process.env.SMTP_PASS || "").trim(),
-      },
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
     });
   }
-  // default: SendGrid
-  const raw = process.env.SENDGRID_API_KEY || "";
-  // 🔒 strip any quotes/newlines/spaces that break the Authorization header
-  const key = raw.replace(/["'\r\n\t ]+/g, "").trim();
-  if (!key) {
-    console.warn("[mailer] SENDGRID_API_KEY is empty after trimming");
+  const key = process.env.SENDGRID_API_KEY || "";
+  if (!key && isProd) {
+    console.warn("[mailer] SENDGRID_API_KEY missing in prod");
   }
   sg.setApiKey(key);
   return null;
 }
 
-// --- send core ---
+/**
+ * sendMail
+ * @param {object} opts
+ * @param {string|string[]} opts.to
+ * @param {string} opts.subject
+ * @param {string} opts.html
+ * @param {string} [opts.text]
+ * @param {string} [opts.category]           // "confirm" | "otp" | "receipt" | "marketing" ...
+ * @param {string} [opts.listUnsubURL]       // for marketing
+ * @param {boolean} [opts.transactional=true]
+ * @param {string} [opts.replyTo]            // optional reply-to
+ */
 async function sendMail({
   to,
   subject,
@@ -56,6 +61,7 @@ async function sendMail({
   category,
   listUnsubURL,
   transactional = true,
+  replyTo,
 }) {
   if (!canSend(to)) return { skipped: true, reason: "not-whitelisted" };
 
@@ -66,31 +72,45 @@ async function sendMail({
     headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
   }
 
+  // Ensure plain-text fallback exists (improves deliverability)
+  const textBody = text || (html ? html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : "");
+
   if (PROVIDER === "smtp") {
     const t = getTransport();
-    const info = await t.sendMail({ from: FROM, to, subject, html, text, headers });
+    const info = await t.sendMail({
+      from: FROM,
+      to,
+      subject,
+      html,
+      text: textBody,
+      headers,
+      replyTo,
+    });
     return { ok: true, id: info.messageId };
   } else {
-    getTransport(); // ensures SendGrid key is sanitized & set
+    // SendGrid
     const msg = {
       from: FROM,
       to,
       subject,
       html,
-      text,
+      text: textBody,
       headers,
+      // For transactional, disable click/open tracking to avoid Promotions/Spam
+      trackingSettings: transactional
+        ? {
+            clickTracking: { enable: false, enableText: false },
+            openTracking: { enable: false },
+          }
+        : undefined,
+      // Transactional should bypass list mgmt; Marketing should not.
       mailSettings: { bypassListManagement: { enable: transactional } },
       categories: category ? [category] : undefined,
+      replyTo,
     };
     const [res] = await sg.send(msg);
     return { ok: res.statusCode < 300, id: res.headers["x-message-id"] || "" };
   }
 }
 
-module.exports = { sendMail, __diag: {
-  provider: () => PROVIDER,
-  isProd: () => isProd,
-  from: () => FROM,
-  keyLen: () => ((process.env.SENDGRID_API_KEY || "").length),
-  keyPreview: () => ((process.env.SENDGRID_API_KEY || "").slice(0,5) + "..."),
-}};
+module.exports = { sendMail };
