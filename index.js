@@ -222,7 +222,7 @@ mountSafe("/api/uploads", uploadRoutes);
 mountSafe("/api/admin-cleanup", adminCleanupRoutes);
 mountSafe("/api/menu-items", menuItemsBulkRoutes);
 mountSafe("/api/otp", otpRoutes);
-mountSafe("/api/email", emailConfirmRoutes);
+mountSafe("/api", emailConfirmRoutes);
 mountSafe("/api/marketing", marketingRoutes);
 mountSafe("/api/dev-email", devEmailRoutes);
 mountSafe("/api/dev-email", devEmailDiagRoutes);

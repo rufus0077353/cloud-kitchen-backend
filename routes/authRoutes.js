@@ -164,6 +164,7 @@ router.post("/admin/register", authenticateToken, requireAdmin, async (req, res)
   }
 });
 
+
 /* --------------------------- Login ------------------------ */
 router.post("/login", async (req, res) => {
   const { email, password } = req.body;
@@ -179,6 +180,15 @@ router.post("/login", async (req, res) => {
       expiresIn: "7d",
     });
 
+    // If not verified, fire-and-forget a fresh link
+    let emailVerification = "ok";
+    if (!user.emailVerified) {
+      emailVerification = "sent";
+      Promise.resolve(sendConfirmEmail(user)).catch((err) =>
+        console.error("[login] sendConfirmEmail failed:", err.message)
+      );
+    }
+
     res.json({
       message: "Login successful",
       token,
@@ -189,6 +199,7 @@ router.post("/login", async (req, res) => {
         role: user.role,
         emailVerified: !!user.emailVerified,
       },
+      emailVerification,
     });
   } catch (err) {
     console.error("❌ Login failed:", err);

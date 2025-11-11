@@ -31,4 +31,12 @@ router.get("/email/confirm", async (req, res) => {
   }
 });
 
+router.get("/verify-email", async (req, res) => {
+    const token = String(req.query.token || "");
+    const fe = (process.env.FRONTEND_BASE_URL || "").replace(/\/+$/,"");
+    if (!token) return res.status(400).json({ message: "token required" });
+    if (fe) return res.redirect(`${fe}/verify-email?token=${encodeURIComponent(token)}`);
+    return res.json({ ok:true, token });
+});
+
 module.exports = router;
