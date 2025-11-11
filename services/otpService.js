@@ -1,42 +1,64 @@
 
 // services/otpService.js
+const crypto = require("crypto");
+const { OtpToken } = require("../models");
 const { sendMail } = require("../utils/mailer");
-const { templates } = require("../utils/templates");
 
-const store = new Map(); // key => { code, exp, attempts, lastSent }
-const TTL_MS = 5 * 60 * 1000;
-const THROTTLE_MS = 45 * 1000;
-const MAX_ATTEMPTS = 6;
+const OTP_TTL_MS = 5 * 60 * 1000;
+const MAX_ATTEMPTS = 5;
 
-const keyFor = (to, purpose="login") => `${String(to).toLowerCase()}::${purpose}`;
-const genCode = () => String(100000 + Math.floor(Math.random() * 900000));
+const genOtp = () => String(Math.floor(100000 + Math.random() * 900000));
+const hash = (email, otp) => crypto.createHash("sha256").update(`${email}:${otp}`).digest("hex");
 
-async function sendOtp(to, purpose="login") {
-  if (!to) throw new Error("to required");
-  const k = keyFor(to, purpose);
-  const now = Date.now();
-  const prev = store.get(k);
-  if (prev && now - prev.lastSent < THROTTLE_MS) {
-    return { ok:true, throttled:true, wait: Math.ceil((THROTTLE_MS-(now-prev.lastSent))/1000) };
+async function createAndSendOtp({ email, channel = "email" }) {
+  const otp = genOtp();
+  const otpHash = hash(email, otp);
+  const expiresAt = new Date(Date.now() + OTP_TTL_MS);
+
+  const [row, created] = await OtpToken.findOrCreate({
+    where: { email },
+    defaults: { email, otpHash, expiresAt, attempts: 0, channel },
+  });
+
+  if (!created) {
+    row.otpHash = otpHash;
+    row.expiresAt = expiresAt;
+    row.attempts = 0;
+    row.channel = channel;
+    await row.save();
   }
-  const code = genCode();
-  store.set(k, { code, exp: now + TTL_MS, attempts: 0, lastSent: now });
 
-  const { subject, html, text } = templates.otpEmail({ code, purpose });
-  const result = await sendMail({ to, subject, html, text, category:"otp", transactional:true });
-  return { ok:true, result, expiresInSec: Math.floor(TTL_MS/1000) };
+  if (channel === "email") {
+    await sendMail({
+      to: email,
+      subject: "Your Servezy verification code",
+      html: `<p>Your verification code is <b>${otp}</b>. It expires in 5 minutes.</p>`,
+      text: `Your verification code is ${otp}. It expires in 5 minutes.`,
+      category: "otp",
+    });
+  }
+
+  return { success: true, expiresAt, debug: process.env.NODE_ENV !== "production" ? otp : undefined };
 }
 
-async function verifyOtp(to, code, purpose="login") {
-  const k = keyFor(to, purpose);
-  const rec = store.get(k);
-  if (!rec) return { ok:false, reason:"not_found" };
-  if (Date.now() > rec.exp) { store.delete(k); return { ok:false, reason:"expired" }; }
-  rec.attempts += 1;
-  if (rec.attempts > MAX_ATTEMPTS) { store.delete(k); return { ok:false, reason:"too_many_attempts" }; }
-  if (String(code) !== String(rec.code)) return { ok:false, reason:"invalid_code" };
-  store.delete(k);
-  return { ok:true };
+async function verifyOtp({ email, otp }) {
+  const row = await OtpToken.findOne({ where: { email } });
+  if (!row) return { ok: false, message: "OTP not found. Please request a new one." };
+
+  if (row.attempts >= MAX_ATTEMPTS) return { ok: false, message: "Too many attempts. Please request a new code." };
+
+  if (!row.expiresAt || new Date(row.expiresAt).getTime() < Date.now()) {
+    return { ok: false, message: "OTP expired. Please request a new one." };
+  }
+
+  const good = row.otpHash === hash(email, otp);
+  row.attempts += 1;
+  await row.save();
+
+  if (!good) return { ok: false, message: "Incorrect code." };
+
+  await row.destroy();
+  return { ok: true };
 }
 
-module.exports = { sendOtp, verifyOtp };
+module.exports = { createAndSendOtp, verifyOtp };

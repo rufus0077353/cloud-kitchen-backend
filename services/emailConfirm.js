@@ -1,46 +1,38 @@
 
 // services/emailConfirm.js
 const crypto = require("crypto");
-const { EmailToken, User } = require("../models");
-const { sendMail } = require("./emailService");
+const { EmailConfirmToken, User } = require("../models");
+const { sendMail } = require("../utils/mailer");
 const { templates } = require("../utils/templates");
 
-/**
- * Sends a confirmation email to the given user.
- */
+const trimBase = (s) => String(s || "").replace(/\/+$/, "");
+const frontendBase = () => trimBase(process.env.FRONTEND_BASE_URL);
+const backendBase  = () => trimBase(process.env.APP_BASE_URL);
+
 async function sendConfirmEmail(user) {
+  if (!user || !user.id || !user.email) throw new Error("user with id & email required");
+
   const token = crypto.randomBytes(24).toString("base64url");
-  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-  await EmailToken.create({ userId: user.id, token, expiresAt });
+  await EmailConfirmToken.create({ userId: user.id, token, expiresAt, usedAt: null });
 
-  const url = `${process.env.APP_BASE_URL || "https://servezy.in"}/verify-email?token=${token}`;
-  const { subject, html, text } = templates.confirmEmail({
-    name: user.name,
-    url,
-  });
+  const fe = frontendBase();
+  const url = fe
+    ? `${fe}/verify-email?token=${encodeURIComponent(token)}`
+    : `${backendBase()}/api/email/confirm?token=${encodeURIComponent(token)}`;
 
-  await sendMail({
-    to: user.email,
-    subject,
-    html,
-    text,
-    category: "confirm",
-    transactional: true,
-  });
+  const { subject, html, text } = templates.confirmEmail({ name: user.name || "", url });
+  return sendMail({ to: user.email, subject, html, text, category: "confirm", transactional: true });
 }
 
-/**
- * Verifies an email confirmation token and activates the user’s email.
- */
 async function verifyConfirmToken(token) {
-  const rec = await EmailToken.findOne({ where: { token, usedAt: null } });
-  if (!rec) throw new Error("Invalid token");
-  if (rec.expiresAt < new Date()) throw new Error("Token expired");
+  const rec = await EmailConfirmToken.findOne({ where: { token, usedAt: null } });
+  if (!rec) throw new Error("invalid_token");
+  if (rec.expiresAt && rec.expiresAt < new Date()) throw new Error("expired");
 
   await rec.update({ usedAt: new Date() });
   await User.update({ emailVerified: true }, { where: { id: rec.userId } });
-
   return { ok: true };
 }
 

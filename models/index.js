@@ -50,6 +50,10 @@ db.OrderItem     = loadModel("OrderItem");
 db.Payout        = loadModel("Payout", ["payout", "Payouts", "payouts"]);
 db.PayoutLog     = loadModel("PayoutLog", ["payoutlog", "Payoutlogs", "payoutlogs"]);
 
+
+db.EmailConfirmToken = loadModel("EmailConfirmToken");
+db.OtpToken         = loadModel("OtpToken");
+
 // Optional
 db.PushSubscription = loadModel("PushSubscription");
 
