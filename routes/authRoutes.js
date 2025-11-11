@@ -4,6 +4,7 @@ const express = require("express");
 const jwt = require("jsonwebtoken");
 const { User, Vendor, sequelize } = require("../models");
 const { authenticateToken, requireAdmin } = require("../middleware/authMiddleware");
+const { sendConfirmEmail } = require("../services/emailConfirm");
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || "nani@143";
@@ -30,7 +31,8 @@ router.post("/register", async (req, res) => {
       return res.status(409).json({ message: "User already registered" });
     }
 
-    const newUser = await User.create({ name, email, password, role }, { transaction: t });
+    // NOTE: password hashing assumed in model hook (User.beforeCreate). If not, add hashing here.
+    const newUser = await User.create({ name, email, password, role, emailVerified: false }, { transaction: t });
 
     let vendor = null;
     if (role === "vendor") {
@@ -55,23 +57,60 @@ router.post("/register", async (req, res) => {
       expiresIn: "7d",
     });
 
+    // Fire & forget email verification so response is fast
+    Promise.resolve(sendConfirmEmail(newUser)).catch((err) =>
+      console.error("[register] sendConfirmEmail failed:", err.message)
+    );
+
     res.status(201).json({
-      message: "User registered",
+      message: "User registered. Please verify your email.",
       token,
       user: {
         id: newUser.id,
         name: newUser.name,
         email: newUser.email,
         role: newUser.role,
+        emailVerified: !!newUser.emailVerified,
       },
-      vendor: vendor
-        ? { id: vendor.id, name: vendor.name, UserId: vendor.UserId }
-        : null,
+      emailVerification: "sent",
+      vendor: vendor ? { id: vendor.id, name: vendor.name, UserId: vendor.UserId } : null,
     });
   } catch (err) {
     await t.rollback();
     console.error("❌ Registration failed:", err);
     res.status(500).json({ message: "Internal server error", error: err.message });
+  }
+});
+
+/* --------------- Resend verification email ---------------- */
+router.post("/email/resend", authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findByPk(req.user.id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+    if (user.emailVerified) {
+      return res.status(400).json({ message: "Email already verified" });
+    }
+
+    Promise.resolve(sendConfirmEmail(user)).catch((err) =>
+      console.error("[resend] sendConfirmEmail failed:", err.message)
+    );
+
+    return res.json({ ok: true, message: "Verification email resent" });
+  } catch (err) {
+    console.error("resend error:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+/* ---------------- Email verification status ---------------- */
+router.get("/email/status", authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findByPk(req.user.id, { attributes: ["id", "emailVerified"] });
+    if (!user) return res.status(404).json({ message: "User not found" });
+    return res.json({ ok: true, emailVerified: !!user.emailVerified });
+  } catch (err) {
+    console.error("status error:", err);
+    return res.status(500).json({ message: "Server error" });
   }
 });
 
@@ -93,7 +132,7 @@ router.post("/admin/register", authenticateToken, requireAdmin, async (req, res)
     }
 
     const newUser = await User.create(
-      { name, email, password, role: normalizedRole },
+      { name, email, password, role: normalizedRole, emailVerified: false },
       { transaction: t }
     );
 
@@ -114,6 +153,7 @@ router.post("/admin/register", authenticateToken, requireAdmin, async (req, res)
         name: newUser.name,
         email: newUser.email,
         role: newUser.role,
+        emailVerified: !!newUser.emailVerified,
       },
       vendor: vendor ? { id: vendor.id, name: vendor.name, UserId: vendor.UserId } : null,
     });
@@ -142,7 +182,13 @@ router.post("/login", async (req, res) => {
     res.json({
       message: "Login successful",
       token,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role },
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        emailVerified: !!user.emailVerified,
+      },
     });
   } catch (err) {
     console.error("❌ Login failed:", err);
@@ -159,12 +205,12 @@ router.put("/update", authenticateToken, async (req, res) => {
 
     if (name) user.name = name;
     if (email) user.email = email;
-    if (password) user.password = password;
+    if (password) user.password = password; // assumes model hook hashes on save
 
     await user.save();
     res.json({
       message: "Profile updated",
-      user: { id: user.id, name: user.name, email: user.email, role: user.role },
+      user: { id: user.id, name: user.name, email: user.email, role: user.role, emailVerified: !!user.emailVerified },
     });
   } catch (err) {
     console.error("❌ Update failed:", err);
@@ -173,8 +219,6 @@ router.put("/update", authenticateToken, async (req, res) => {
 });
 
 /* ----------------------- /auth/me -------------------------- */
-
-// GET /api/auth/me
 router.get("/me", authenticateToken, async (req, res) => {
   try {
     const userId = Number(req.user?.id ?? req.user?.userId);
@@ -182,24 +226,20 @@ router.get("/me", authenticateToken, async (req, res) => {
       return res.status(401).json({ message: "Unauthorized: no user id" });
     }
 
-    // fetch the bare user first
     const user = await User.findByPk(userId, {
-      attributes: ["id", "name", "email", "role"],
+      attributes: ["id", "name", "email", "role", "emailVerified"],
     });
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    // ensure a Vendor exists if the user is a vendor
     const role = String(user.role || "").toLowerCase();
     let vendor = null;
 
     if (role === "vendor") {
-      // try to find vendor linked to this user
       vendor = await Vendor.findOne({
         where: { UserId: user.id },
         attributes: ["id", "name", "location", "isOpen", "isDeleted"],
       });
 
-      // create (or un-delete) if missing
       if (!vendor) {
         vendor = await Vendor.create({
           UserId: user.id,
@@ -214,12 +254,10 @@ router.get("/me", authenticateToken, async (req, res) => {
         await vendor.save();
       }
     } else {
-      // if not a vendor, still return any linked vendor if it exists
       vendor = await Vendor.findOne({
         where: { UserId: user.id },
         attributes: ["id", "name", "location", "isOpen", "isDeleted"],
       });
-      // (do not auto-create for non-vendor roles)
     }
 
     return res.json({
@@ -227,6 +265,7 @@ router.get("/me", authenticateToken, async (req, res) => {
       name: user.name,
       email: user.email,
       role: user.role,
+      emailVerified: !!user.emailVerified,
       vendorId: vendor ? vendor.id : null,
       vendor: vendor
         ? {
