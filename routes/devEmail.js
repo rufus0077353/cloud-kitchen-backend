@@ -7,7 +7,6 @@ const { sendMail } = require("../utils/mailer");
 // GET /api/dev-email/ping
 router.get("/ping", (_req, res) => res.json({ ok: true, t: Date.now() }));
 
-// POST /api/dev-email/send
 router.post("/send", async (req, res) => {
   try {
     const { to, subject, message } = req.body || {};
@@ -24,11 +23,20 @@ router.post("/send", async (req, res) => {
       transactional: true,
     });
 
+    if (!result?.ok) {
+      return res.status(result.status || 500).json({
+        message: "Email send failed",
+        error: result.code || "sendgrid_error",
+        details: result.errors || undefined,
+      });
+    }
+
     return res.json({ ok: true, result });
   } catch (err) {
     console.error("dev-email/send error:", err);
-    return res.status(500).json({ message: "Email send failed", error: err.message });
+    return res.status(500).json({ message: "Email send failed", error: String(err?.message || err) });
   }
 });
+
 
 module.exports = router;

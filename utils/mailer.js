@@ -90,7 +90,7 @@ async function sendMail({
     });
     return { ok: true, id: info.messageId };
   } else {
-    // SendGrid
+    // ---- SendGrid
     const msg = {
       from: FROM,
       to,
@@ -99,20 +99,39 @@ async function sendMail({
       text: textBody,
       headers,
       trackingSettings: transactional
-        ? {
-            clickTracking: { enable: false, enableText: false },
-            openTracking: { enable: false },
-          }
+        ? { clickTracking: { enable: false, enableText: false }, openTracking: { enable: false } }
         : undefined,
       mailSettings: { bypassListManagement: { enable: transactional } },
       categories: category ? [category] : undefined,
       ...(replyTo ? { replyTo } : {}),
     };
-    const [res] = await sg.send(msg);
-    return { ok: res.statusCode < 300, id: res.headers["x-message-id"] || "" };
+
+    try {
+      const [res] = await sg.send(msg);
+      return {
+        ok: res.statusCode < 300,
+        status: res.statusCode,
+        id: res.headers?.["x-message-id"] || "",
+      };
+    } catch (e) {
+      // Surface the *real* SendGrid error
+      const status = e?.code || e?.response?.statusCode || 500;
+      const body   = e?.response?.body || {};
+      const errors = Array.isArray(body?.errors) ? body.errors : undefined;
+
+      // Helpful for server logs
+      console.error("[mailer] sendgrid_error", { status, errors });
+
+      // Return a structured error up to the route
+      return {
+        ok: false,
+        status,
+        code: e?.code || "sendgrid_error",
+        errors: errors || [{ message: e?.message || "Unknown SendGrid error" }],
+      };
+    }
   }
 }
-
 /* ---------- diagnostics for /api/dev-email/diag ---------- */
 const SG_KEY_RAW = String(process.env.SENDGRID_API_KEY || "");
 const preview = SG_KEY_RAW ? `${SG_KEY_RAW.slice(0, 4)}…${SG_KEY_RAW.slice(-4)}` : "";
@@ -127,5 +146,5 @@ module.exports = {
     from: () => FROM,
     keyLen: () => SG_KEY_RAW.length,
     keyPreview: () => preview,
-  },
+  },    
 };
