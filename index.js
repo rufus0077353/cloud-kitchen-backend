@@ -148,11 +148,7 @@ const uploadRoutes = require("./routes/uploadRoutes");
 const adminCleanupRoutes = require("./routes/adminCleanupRoutes");
 const debugRoutes = require("./routes/debugRoutes");
 const menuItemsBulkRoutes = require("./routes/menuItemsBulkRoutes");
-const otpRoutes = require("./routes/otpRoutes");
-const emailConfirmRoutes = require("./routes/emailConfirmRoutes");
-const marketingRoutes = require("./routes/marketingRoutes");
-const devEmailRoutes = require("./routes/devEmail");
-const devEmailDiagRoutes = require("./routes/devEmailDiagRoutes");
+
 
 
 let paymentsRouter = null;
@@ -221,11 +217,6 @@ mountSafe("/api/admin", adminRoutes);
 mountSafe("/api/uploads", uploadRoutes);
 mountSafe("/api/admin-cleanup", adminCleanupRoutes);
 mountSafe("/api/menu-items", menuItemsBulkRoutes);
-mountSafe("/api/otp", otpRoutes);
-mountSafe("/api", emailConfirmRoutes);
-mountSafe("/api/marketing", marketingRoutes);
-mountSafe("/api/dev-email", devEmailRoutes);
-mountSafe("/api/dev-email", devEmailDiagRoutes);
 if (paymentsRouter) mountWithEmit("/api/payments", paymentsRouter);
 
 /* =========================
